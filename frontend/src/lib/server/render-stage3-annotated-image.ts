@@ -84,15 +84,36 @@ export async function renderStage3AnnotatedPng(params: {
     `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">`,
   ];
   for (const b of boxes) {
-    const bw = Math.max(0, b.x2 - b.x1);
-    const bh = Math.max(0, b.y2 - b.y1);
+    const x1 = Math.min(b.x1, b.x2);
+    const y1 = Math.min(b.y1, b.y2);
+    const x2 = Math.max(b.x1, b.x2);
+    const y2 = Math.max(b.y1, b.y2);
+    const bw = Math.max(0, x2 - x1);
+    const bh = Math.max(0, y2 - y1);
     const label = svgEscape(b.legendKey);
-    const badgeW = Math.max(18, 8 + label.length * 7);
-    const badgeH = 18;
+    // Match the live overlay idea: label scales with box size so a tiny detection
+    // does not get a fixed ~18px badge that covers the object on full-res exports.
+    const boxShort = Math.min(bw, bh);
+    const badgeH =
+      boxShort > 0
+        ? Math.round(Math.min(22, Math.max(11, boxShort * 0.42)))
+        : 18;
+    const fontSize = Math.max(9, badgeH - 6);
+    const charW = Math.max(5, Math.round(fontSize * 0.62));
+    let badgeW = Math.max(badgeH, 5 + label.length * charW);
+    if (bw > 0) {
+      badgeW = Math.min(badgeW, Math.max(badgeH, bw));
+    }
+    const textY = y1 + Math.round(badgeH * 0.72);
+    const fillParts = /^#([0-9a-fA-F]{6})([0-9a-fA-F]{2})$/.exec(b.fill);
+    const fillBase = fillParts ? `#${fillParts[1]}` : b.fill;
+    const fillOpacity = fillParts
+      ? String(Math.round((parseInt(fillParts[2], 16) / 255) * 1000) / 1000)
+      : "1";
     parts.push(
-      `<rect x="${b.x1}" y="${b.y1}" width="${bw}" height="${bh}" fill="${b.fill}" stroke="${b.stroke}" stroke-width="2"/>`,
-      `<rect x="${b.x1}" y="${b.y1}" width="${badgeW}" height="${badgeH}" fill="${b.badge}"/>`,
-      `<text x="${b.x1 + 4}" y="${b.y1 + 13}" fill="white" font-size="11" font-family="ui-monospace, monospace" font-weight="bold">${label}</text>`,
+      `<rect x="${x1}" y="${y1}" width="${bw}" height="${bh}" fill="${fillBase}" fill-opacity="${fillOpacity}" stroke="${b.stroke}" stroke-width="2"/>`,
+      `<rect x="${x1}" y="${y1}" width="${badgeW}" height="${badgeH}" fill="${b.badge}"/>`,
+      `<text x="${x1 + 4}" y="${textY}" fill="white" font-size="${fontSize}" font-family="Helvetica, Arial, Liberation Sans, DejaVu Sans, sans-serif" font-weight="700">${label}</text>`,
     );
   }
   parts.push("</svg>");
