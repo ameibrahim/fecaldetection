@@ -13,10 +13,16 @@ import {
 } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import {
+  STAGE1_MODEL_FILENAMES,
+  getStage1GradcamWsUrl,
   getStage1WsOriginForClient,
   getStage2WsOriginForClient,
   getStage3WsOriginForClient,
 } from "@/lib/helminth-config";
+import {
+  Stage1GradcamGrid,
+  type Stage1GradcamModelEntry,
+} from "@/components/dashboard/stage1-gradcam-grid";
 import { DetectionImagePreview } from "@/components/dashboard/detection-image-preview";
 import { getDetectionPaletteEntryForClass } from "@/lib/detection-palette";
 import { buildDetectionOverlayItemsFromResults } from "@/lib/stage3-detection-overlay";
@@ -51,6 +57,19 @@ type PipelineSubmitResponse = {
     stage: StageNumber;
     externalJobId: string;
     totalModels: number;
+  };
+};
+
+type GradcamWsPayload = {
+  type?: string;
+  job_id?: string;
+  total_models?: number;
+  status?: string;
+  data?: {
+    modelFilename?: string;
+    gradcamImage?: string;
+    error?: string;
+    details?: string;
   };
 };
 
@@ -212,8 +231,15 @@ export function HelminthPredictPanel({
   const [stage1Vote, setStage1Vote] = useState<StageVoteSummary | null>(null);
   const [stage2Vote, setStage2Vote] = useState<StageVoteSummary | null>(null);
   const [localImageUrl, setLocalImageUrl] = useState<string | null>(null);
+  const [gradcamPanel, setGradcamPanel] = useState<{
+    phase: "idle" | "loading" | "complete" | "error";
+    connectionError: string | null;
+    byModel: Record<string, Stage1GradcamModelEntry>;
+  }>({ phase: "idle", connectionError: null, byModel: {} });
 
   const wsRef = useRef<WebSocket | null>(null);
+  const gradcamWsRef = useRef<WebSocket | null>(null);
+  const gradcamPingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fallbackRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const runIdRef = useRef<string | null>(null);
@@ -270,6 +296,128 @@ export function HelminthPredictPanel({
       wsRef.current = null;
     }
   }, [clearTimers]);
+
+  const teardownGradcamWs = useCallback(() => {
+    if (gradcamPingRef.current) {
+      clearInterval(gradcamPingRef.current);
+      gradcamPingRef.current = null;
+    }
+    if (gradcamWsRef.current) {
+      gradcamWsRef.current.close();
+      gradcamWsRef.current = null;
+    }
+  }, []);
+
+  const connectStage1Gradcam = useCallback(
+    (jobId: string) => {
+      teardownGradcamWs();
+      const initial: Record<string, Stage1GradcamModelEntry> = {};
+      for (const m of STAGE1_MODEL_FILENAMES) {
+        initial[m] = { status: "pending" };
+      }
+      setGradcamPanel({
+        phase: "loading",
+        connectionError: null,
+        byModel: initial,
+      });
+
+      let ws: WebSocket;
+      try {
+        ws = new WebSocket(getStage1GradcamWsUrl(jobId));
+      } catch {
+        setGradcamPanel({
+          phase: "error",
+          connectionError: "Could not open Grad-CAM connection.",
+          byModel: initial,
+        });
+        return;
+      }
+      gradcamWsRef.current = ws;
+
+      ws.onopen = () => {
+        gradcamPingRef.current = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) ws.send("ping");
+        }, 15000);
+      };
+
+      ws.onmessage = (evt) => {
+        try {
+          const msg = JSON.parse(String(evt.data)) as GradcamWsPayload;
+          setGradcamPanel((prev) => {
+            const nextMap = { ...prev.byModel };
+
+            if (msg.type === "gradcam" && msg.data?.modelFilename) {
+              const mf = msg.data.modelFilename;
+              const src = msg.data.gradcamImage;
+              if (typeof src === "string" && src.length > 32) {
+                nextMap[mf] = {
+                  status: "ok",
+                  imageSrc: src.startsWith("data:")
+                    ? src
+                    : `data:image/png;base64,${src}`,
+                };
+              } else {
+                nextMap[mf] = {
+                  status: "error",
+                  error: "No image returned.",
+                };
+              }
+            }
+
+            if (msg.type === "gradcam_error" && msg.data?.modelFilename) {
+              const mf = msg.data.modelFilename;
+              nextMap[mf] = {
+                status: "error",
+                error: String(
+                  msg.data.error ?? msg.data.details ?? "Grad-CAM failed",
+                ),
+              };
+            }
+
+            const accounted = STAGE1_MODEL_FILENAMES.every(
+              (fn) => nextMap[fn]?.status !== "pending",
+            );
+            const phase: "loading" | "complete" =
+              msg.type === "finished" || accounted ? "complete" : "loading";
+
+            if (phase === "complete") {
+              queueMicrotask(() => teardownGradcamWs());
+            }
+
+            return {
+              ...prev,
+              byModel: nextMap,
+              phase,
+            };
+          });
+        } catch {
+          /* ignore malformed frames */
+        }
+      };
+
+      ws.onerror = () => {
+        setGradcamPanel((prev) =>
+          prev.phase === "loading"
+            ? {
+                ...prev,
+                phase: "error",
+                connectionError: "Grad-CAM connection failed.",
+              }
+            : prev,
+        );
+        teardownGradcamWs();
+      };
+
+      ws.onclose = () => {
+        if (gradcamPingRef.current) {
+          clearInterval(gradcamPingRef.current);
+          gradcamPingRef.current = null;
+        }
+        gradcamWsRef.current = null;
+      };
+    },
+    [teardownGradcamWs],
+  );
 
   const handleStatusResultRef = useRef<
     ((runId: string, result: PipelineStatusPayload) => Promise<void>) | null
@@ -443,6 +591,9 @@ export function HelminthPredictPanel({
           applyWsPayload(msg, stage);
           if (msg.type === "finished" || msg.status === "finished") {
             teardownWs();
+            if (stage === 1) {
+              connectStage1Gradcam(externalJobId);
+            }
             void (async () => {
               const res = await fetch(
                 `/api/predictions/pipeline-run/${encodeURIComponent(runId)}/finalize`,
@@ -484,6 +635,7 @@ export function HelminthPredictPanel({
       delegateAuthHeaders,
       startFallbackSync,
       teardownWs,
+      connectStage1Gradcam,
     ],
   );
 
@@ -626,13 +778,21 @@ export function HelminthPredictPanel({
     handleStatusResultRef.current = handleStatusResult;
   }, [handleStatusResult]);
 
-  useEffect(() => () => teardownWs(), [teardownWs]);
+  useEffect(
+    () => () => {
+      teardownWs();
+      teardownGradcamWs();
+    },
+    [teardownWs, teardownGradcamWs],
+  );
 
   const onSubmit = async () => {
     if (!file) return;
     fileRef.current = file;
     stage2StartedRef.current = false;
     stage3StartedRef.current = false;
+    teardownGradcamWs();
+    setGradcamPanel({ phase: "idle", connectionError: null, byModel: {} });
     setError(null);
     setPreview(null);
     setActivity([]);
@@ -878,6 +1038,14 @@ export function HelminthPredictPanel({
               </Card>
             </div>
           )}
+
+          <Stage1GradcamGrid
+            modelFilenames={STAGE1_MODEL_FILENAMES}
+            shortName={shortModelName}
+            phase={gradcamPanel.phase}
+            connectionError={gradcamPanel.connectionError}
+            byModel={gradcamPanel.byModel}
+          />
 
           {activity.length > 0 && (
             <Card className="border-border/80">
