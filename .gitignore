@@ -36,3 +36,5 @@ AGENTS.md
 .cursorrules
 .cursorignore
 *.cursor*
+scripts
+scripts/*
