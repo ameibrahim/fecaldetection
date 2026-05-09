@@ -162,16 +162,16 @@ export function Stage1GradcamGrid({
           <SheetHeader className="border-b border-border/60 px-4 py-3 text-left">
             <SheetTitle className="pr-8">{lightbox?.title ?? "Grad-CAM"}</SheetTitle>
             <SheetDescription className="sr-only">
-              Full-size Grad-CAM heatmap for the selected model.
+              Larger view of the Grad-CAM heatmap. Scales down to fit; not stretched to full width.
             </SheetDescription>
           </SheetHeader>
-          <div className="flex max-h-[min(78vh,calc(92vh-5rem))] items-center justify-center overflow-auto bg-muted/30 p-4">
+          <div className="flex min-h-0 max-h-[min(78vh,calc(92vh-5rem))] items-center justify-center overflow-auto bg-muted/30 p-4 sm:p-6">
             {lightbox ? (
               /* eslint-disable-next-line @next/next/no-img-element -- data URL from API */
               <img
                 src={lightbox.src}
                 alt={`Grad-CAM heatmap enlarged for ${lightbox.title}`}
-                className="h-auto max-h-full w-full max-w-full object-contain"
+                className="mx-auto h-auto w-auto max-h-[min(72vh,760px)] max-w-[min(100%,42rem)] object-contain"
               />
             ) : null}
           </div>
