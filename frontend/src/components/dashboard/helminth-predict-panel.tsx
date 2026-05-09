@@ -19,6 +19,7 @@ import {
   getStage2WsOriginForClient,
   getStage3WsOriginForClient,
 } from "@/lib/helminth-config";
+import { extractGradcamPayload } from "@/lib/stage1-gradcam-ws";
 import {
   Stage1GradcamGrid,
   type Stage1GradcamModelEntry,
@@ -57,19 +58,6 @@ type PipelineSubmitResponse = {
     stage: StageNumber;
     externalJobId: string;
     totalModels: number;
-  };
-};
-
-type GradcamWsPayload = {
-  type?: string;
-  job_id?: string;
-  total_models?: number;
-  status?: string;
-  data?: {
-    modelFilename?: string;
-    gradcamImage?: string;
-    error?: string;
-    details?: string;
   };
 };
 
@@ -240,6 +228,7 @@ export function HelminthPredictPanel({
   const wsRef = useRef<WebSocket | null>(null);
   const gradcamWsRef = useRef<WebSocket | null>(null);
   const gradcamPingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const gradcamSessionRef = useRef(0);
   const pingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fallbackRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const runIdRef = useRef<string | null>(null);
@@ -311,6 +300,7 @@ export function HelminthPredictPanel({
   const connectStage1Gradcam = useCallback(
     (jobId: string) => {
       teardownGradcamWs();
+      const sessionId = ++gradcamSessionRef.current;
       const initial: Record<string, Stage1GradcamModelEntry> = {};
       for (const m of STAGE1_MODEL_FILENAMES) {
         initial[m] = { status: "pending" };
@@ -335,52 +325,58 @@ export function HelminthPredictPanel({
       gradcamWsRef.current = ws;
 
       ws.onopen = () => {
+        if (sessionId !== gradcamSessionRef.current) return;
         gradcamPingRef.current = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) ws.send("ping");
         }, 15000);
       };
 
       ws.onmessage = (evt) => {
+        if (sessionId !== gradcamSessionRef.current) return;
         try {
-          const msg = JSON.parse(String(evt.data)) as GradcamWsPayload;
+          const raw = JSON.parse(String(evt.data)) as unknown;
+          const parsed = extractGradcamPayload(raw);
           setGradcamPanel((prev) => {
             const nextMap = { ...prev.byModel };
 
-            if (msg.type === "gradcam" && msg.data?.modelFilename) {
-              const mf = msg.data.modelFilename;
-              const src = msg.data.gradcamImage;
-              if (typeof src === "string" && src.length > 32) {
-                nextMap[mf] = {
+            if (parsed.isFinished) {
+              const gotAny = STAGE1_MODEL_FILENAMES.some(
+                (fn) => nextMap[fn]?.status !== "pending",
+              );
+              // Ignore a stray `finished` before any model payload (would close the socket early).
+              if (!gotAny) {
+                return prev;
+              }
+              for (const fn of STAGE1_MODEL_FILENAMES) {
+                if (nextMap[fn]?.status === "pending") {
+                  nextMap[fn] = {
+                    status: "error",
+                    error: "No Grad-CAM output received.",
+                  };
+                }
+              }
+            } else if (parsed.modelKey) {
+              if (parsed.imageSrc) {
+                nextMap[parsed.modelKey] = {
                   status: "ok",
-                  imageSrc: src.startsWith("data:")
-                    ? src
-                    : `data:image/png;base64,${src}`,
+                  imageSrc: parsed.imageSrc,
                 };
               } else {
-                nextMap[mf] = {
+                nextMap[parsed.modelKey] = {
                   status: "error",
-                  error: "No image returned.",
+                  error:
+                    parsed.errorText?.trim() ||
+                    "Grad-CAM unavailable for this model.",
                 };
               }
-            }
-
-            if (msg.type === "gradcam_error" && msg.data?.modelFilename) {
-              const mf = msg.data.modelFilename;
-              nextMap[mf] = {
-                status: "error",
-                error: String(
-                  msg.data.error ?? msg.data.details ?? "Grad-CAM failed",
-                ),
-              };
             }
 
             const accounted = STAGE1_MODEL_FILENAMES.every(
               (fn) => nextMap[fn]?.status !== "pending",
             );
-            const phase: "loading" | "complete" =
-              msg.type === "finished" || accounted ? "complete" : "loading";
+            const phase: "loading" | "complete" = accounted ? "complete" : "loading";
 
-            if (phase === "complete") {
+            if (accounted) {
               queueMicrotask(() => teardownGradcamWs());
             }
 
