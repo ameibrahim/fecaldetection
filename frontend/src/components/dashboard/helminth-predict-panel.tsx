@@ -580,6 +580,11 @@ export function HelminthPredictPanel({
         pingRef.current = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) ws.send("ping");
         }, 15000);
+        // Open Grad-CAM in parallel with Stage 1 predictions. Connecting only after
+        // `finished` is often too late (job/session closed server-side before heatmaps emit).
+        if (stage === 1) {
+          connectStage1Gradcam(externalJobId);
+        }
       };
       ws.onmessage = (evt) => {
         try {
@@ -587,9 +592,6 @@ export function HelminthPredictPanel({
           applyWsPayload(msg, stage);
           if (msg.type === "finished" || msg.status === "finished") {
             teardownWs();
-            if (stage === 1) {
-              connectStage1Gradcam(externalJobId);
-            }
             void (async () => {
               const res = await fetch(
                 `/api/predictions/pipeline-run/${encodeURIComponent(runId)}/finalize`,
