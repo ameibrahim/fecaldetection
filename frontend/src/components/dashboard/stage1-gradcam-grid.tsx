@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Card,
   CardContent,
@@ -9,15 +9,9 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { AlertCircle, ImageIcon, Maximize2 } from "lucide-react";
+import { AlertCircle, ImageIcon, Maximize2, X } from "lucide-react";
 
 export type Stage1GradcamModelEntry = {
   status: "pending" | "ok" | "error";
@@ -35,6 +29,10 @@ export type Stage1GradcamGridProps = {
   byModel: Record<string, Stage1GradcamModelEntry>;
 };
 
+/** Same image sizing as `prediction-history-card.tsx` detail slide. */
+const HISTORY_DETAIL_IMG_CLASS =
+  "relative z-10 mx-auto block h-auto max-h-[min(70vh,560px)] w-full rounded-lg border border-border/60 object-contain";
+
 export function Stage1GradcamGrid({
   modelFilenames,
   shortName,
@@ -47,6 +45,20 @@ export function Stage1GradcamGrid({
     title: string;
   } | null>(null);
 
+  useEffect(() => {
+    if (!lightbox) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setLightbox(null);
+    };
+    window.addEventListener("keydown", onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prev;
+    };
+  }, [lightbox]);
+
   if (phase === "idle") return null;
 
   const okCount = modelFilenames.filter((m) => byModel[m]?.status === "ok").length;
@@ -58,10 +70,10 @@ export function Stage1GradcamGrid({
     <>
       <Card className="border-border/80">
         <CardHeader>
-          <CardTitle className="text-base">Stage 1 · model attention (Grad-CAM)</CardTitle>
+          <CardTitle className="text-base">Stage 1 · model attention (Grad CAM)</CardTitle>
           <CardDescription>
-            Heatmaps show where each fecal-detection model focuses on your image. Not a
-            diagnosis — explainability only. Tap a heatmap to enlarge it.
+            Heatmaps show where each fecal detection model focuses on your image. Not a
+            diagnosis, explainability only. Tap a heatmap to enlarge it.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -77,8 +89,8 @@ export function Stage1GradcamGrid({
 
           <p className="sr-only" aria-live="polite">
             {phase === "loading"
-              ? `Grad-CAM progress: ${okCount + errCount} of ${modelFilenames.length} models.`
-              : `Grad-CAM complete: ${okCount} heatmaps ready, ${errCount} unavailable.`}
+              ? `Grad CAM progress: ${okCount + errCount} of ${modelFilenames.length} models.`
+              : `Grad CAM complete: ${okCount} heatmaps ready, ${errCount} unavailable.`}
           </p>
 
           <p className="text-xs text-muted-foreground">
@@ -128,7 +140,7 @@ export function Stage1GradcamGrid({
                         {/* eslint-disable-next-line @next/next/no-img-element -- data URL from API */}
                         <img
                           src={entry.imageSrc}
-                          alt={`Grad-CAM heatmap for ${shortName(filename)}`}
+                          alt={`Grad CAM heatmap for ${shortName(filename)}`}
                           className="size-full object-contain"
                         />
                         <span className="pointer-events-none absolute bottom-1 right-1 flex items-center gap-0.5 rounded bg-background/85 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground shadow-sm opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
@@ -141,7 +153,7 @@ export function Stage1GradcamGrid({
                       <div className="relative z-10 flex size-full flex-col items-center justify-center gap-1 p-2 text-center">
                         <ImageIcon className="size-8 text-muted-foreground/60" aria-hidden />
                         <p className="text-[11px] leading-snug text-muted-foreground">
-                          {entry.error ?? "Grad-CAM unavailable"}
+                          {entry.error ?? "Grad CAM unavailable"}
                         </p>
                       </div>
                     ) : null}
@@ -153,30 +165,62 @@ export function Stage1GradcamGrid({
         </CardContent>
       </Card>
 
-      <Sheet open={lightbox !== null} onOpenChange={(open) => !open && setLightbox(null)}>
-        <SheetContent
-          side="bottom"
-          showCloseButton
-          className="max-h-[92vh] gap-0 overflow-hidden border-t bg-background p-0 sm:max-h-[88vh]"
-        >
-          <SheetHeader className="border-b border-border/60 px-4 py-3 text-left">
-            <SheetTitle className="pr-8">{lightbox?.title ?? "Grad-CAM"}</SheetTitle>
-            <SheetDescription className="sr-only">
-              Larger view of the Grad-CAM heatmap. Scales down to fit; not stretched to full width.
-            </SheetDescription>
-          </SheetHeader>
-          <div className="flex min-h-0 max-h-[min(78vh,calc(92vh-5rem))] items-center justify-center overflow-auto bg-muted/30 p-4 sm:p-6">
-            {lightbox ? (
-              /* eslint-disable-next-line @next/next/no-img-element -- data URL from API */
-              <img
-                src={lightbox.src}
-                alt={`Grad-CAM heatmap enlarged for ${lightbox.title}`}
-                className="mx-auto h-auto w-auto max-h-[min(72vh,760px)] max-w-[min(100%,42rem)] object-contain"
-              />
-            ) : null}
+      {lightbox ? (
+        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 sm:p-8">
+          <button
+            type="button"
+            className="fixed inset-0 bg-black/55 backdrop-blur-[1px]"
+            aria-label="Close details"
+            onClick={() => setLightbox(null)}
+          />
+          <div
+            className="relative z-10 mt-0 w-full max-w-3xl rounded-xl border border-border/80 bg-background shadow-xl"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="gradcam-lightbox-title"
+          >
+            <div className="flex flex-col gap-3 border-b border-border/60 px-4 py-3 sm:flex-row sm:items-start sm:justify-between sm:px-5">
+              <div className="min-w-0 flex-1">
+                <h2
+                  id="gradcam-lightbox-title"
+                  className="truncate text-base font-semibold text-foreground"
+                >
+                  {lightbox.title}
+                </h2>
+                <p className="text-xs text-muted-foreground">
+                  Grad CAM heatmap · explainability only
+                </p>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                className="shrink-0 self-start"
+                onClick={() => setLightbox(null)}
+                aria-label="Close"
+              >
+                <X className="size-4" aria-hidden />
+              </Button>
+            </div>
+
+            <div className="max-h-[calc(100vh-8rem)] space-y-5 overflow-y-auto px-4 py-4 sm:px-5 sm:py-5">
+              <div className="space-y-2">
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Model attention
+                </p>
+                <div className="relative w-full min-h-[min(40vh,320px)]">
+                  {/* eslint-disable-next-line @next/next/no-img-element -- data URL from API */}
+                  <img
+                    src={lightbox.src}
+                    alt={`Grad CAM heatmap for ${lightbox.title}`}
+                    className={HISTORY_DETAIL_IMG_CLASS}
+                  />
+                </div>
+              </div>
+            </div>
           </div>
-        </SheetContent>
-      </Sheet>
+        </div>
+      ) : null}
     </>
   );
 }

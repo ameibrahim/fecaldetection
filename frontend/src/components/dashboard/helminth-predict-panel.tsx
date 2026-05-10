@@ -134,9 +134,9 @@ function classLabel(stage: StageNumber, predictedClass: number | null): string {
   if (stage === 3) return "Species localization";
   if (predictedClass === null) return "Unknown";
   if (stage === 1) {
-    return predictedClass === 0 ? "Fecal" : "Non-fecal";
+    return predictedClass === 0 ? "Fecal" : "Non fecal";
   }
-  return predictedClass === 0 ? "Helminths detected" : "No helminths";
+  return predictedClass === 0 ? "Helminth detected" : "No helminth";
 }
 
 function toConfidencePercent(
@@ -267,6 +267,25 @@ export function HelminthPredictPanel({
       ? Math.min(100, Math.round((progress.done / progress.total) * 100))
       : 0;
 
+  // Broadcast stage state so the dashboard hero / card header can show a live
+  // pipeline indicator without lifting state out of this panel.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const activeStage =
+      stage3Status === "active"
+        ? 3
+        : stage2Status === "active"
+          ? 2
+          : stage1Status === "active"
+            ? 1
+            : null;
+    window.dispatchEvent(
+      new CustomEvent("predict:status", {
+        detail: { running: activeStage !== null, stage: activeStage },
+      }),
+    );
+  }, [stage1Status, stage2Status, stage3Status]);
+
   const clearTimers = useCallback(() => {
     if (pingRef.current) {
       clearInterval(pingRef.current);
@@ -317,7 +336,7 @@ export function HelminthPredictPanel({
       } catch {
         setGradcamPanel({
           phase: "error",
-          connectionError: "Could not open Grad-CAM connection.",
+          connectionError: "Could not open Grad CAM connection.",
           byModel: initial,
         });
         return;
@@ -351,7 +370,7 @@ export function HelminthPredictPanel({
                 if (nextMap[fn]?.status === "pending") {
                   nextMap[fn] = {
                     status: "error",
-                    error: "No Grad-CAM output received.",
+                    error: "No Grad CAM output received.",
                   };
                 }
               }
@@ -366,7 +385,7 @@ export function HelminthPredictPanel({
                   status: "error",
                   error:
                     parsed.errorText?.trim() ||
-                    "Grad-CAM unavailable for this model.",
+                    "Grad CAM unavailable for this model.",
                 };
               }
             }
@@ -397,7 +416,7 @@ export function HelminthPredictPanel({
             ? {
                 ...prev,
                 phase: "error",
-                connectionError: "Grad-CAM connection failed.",
+                connectionError: "Grad CAM connection failed.",
               }
             : prev,
         );
@@ -571,7 +590,7 @@ export function HelminthPredictPanel({
       try {
         ws = new WebSocket(wsUrlForStage(stage, externalJobId));
       } catch {
-        setLiveMessage("WebSocket unavailable — syncing over HTTPS.");
+        setLiveMessage("WebSocket unavailable, syncing over HTTPS.");
         startFallbackSync(runId);
         return;
       }
@@ -580,7 +599,7 @@ export function HelminthPredictPanel({
         pingRef.current = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) ws.send("ping");
         }, 15000);
-        // Open Grad-CAM in parallel with Stage 1 predictions. Connecting only after
+        // Open Grad CAM in parallel with Stage 1 predictions. Connecting only after
         // `finished` is often too late (job/session closed server-side before heatmaps emit).
         if (stage === 1) {
           connectStage1Gradcam(externalJobId);
@@ -618,7 +637,7 @@ export function HelminthPredictPanel({
         }
       };
       ws.onerror = () => {
-        setLiveMessage("WebSocket error — falling back to HTTPS sync.");
+        setLiveMessage("WebSocket error, falling back to HTTPS sync.");
         teardownWs();
         startFallbackSync(runId);
       };
@@ -651,7 +670,7 @@ export function HelminthPredictPanel({
 
       setStage2Status("active");
       setProgress({ done: 0, total: 0 });
-      setLiveMessage("Stage 1 is fecal-positive. Starting Stage 2 helminth screening…");
+      setLiveMessage("Stage 1 is fecal positive. Starting Stage 2 Helminth Screening…");
 
       const fd = new FormData();
       fd.set("image", originalFile);
@@ -697,7 +716,7 @@ export function HelminthPredictPanel({
       setStage3Status("active");
       setProgress({ done: 0, total: 0 });
       setPreview(null);
-      setLiveMessage("Helminths detected. Starting Stage 3 species localization…");
+      setLiveMessage("Helminth detected. Starting Stage 3 species localization…");
 
       const fd = new FormData();
       fd.set("image", originalFile);
@@ -741,7 +760,7 @@ export function HelminthPredictPanel({
         setStage2Status("skipped");
         setStage3Status("skipped");
         await finishPipeline(
-          "Stage 1 majority vote is non-fecal. Stage 2 skipped and run saved.",
+          "Stage 1 majority vote is non fecal. Stage 2 skipped and run saved.",
         );
         return;
       }
@@ -849,17 +868,17 @@ export function HelminthPredictPanel({
     stage1Vote?.majorityClass === 0
       ? "Fecal"
       : stage1Vote?.majorityClass === 1
-        ? "Non-fecal"
+        ? "Non fecal"
         : stage1Status === "active"
           ? "Running"
           : "Waiting";
   const stage2ResultLabel =
     stage2Vote?.majorityClass === 0
-      ? "Helminths detected"
+      ? "Helminth detected"
       : stage2Vote?.majorityClass === 1
-        ? "No helminths"
+        ? "No helminth"
         : stage2Status === "skipped"
-          ? "Not run (Stage 1 was non-fecal)"
+          ? "Not run (Stage 1 was non fecal)"
           : stage2Status === "active"
             ? "Running"
             : "Waiting";
@@ -871,8 +890,8 @@ export function HelminthPredictPanel({
         ? "Running"
         : stage3Status === "skipped"
           ? stage2Status === "skipped"
-            ? "Not run (Stage 1 non-fecal)"
-            : "Not run (no helminths)"
+            ? "Not run (Stage 1 non fecal)"
+            : "Not run (no helminth)"
           : "Waiting";
 
   const detectionOverlayItems: DetectionBoxItem[] = useMemo(
@@ -895,12 +914,11 @@ export function HelminthPredictPanel({
 
       <div className="rounded-xl border border-border/60 bg-gradient-to-b from-background to-muted/20 p-5">
         <p className="mb-1 text-xs font-medium uppercase tracking-widest text-muted-foreground">
-          Three-phase pipeline
+          Three phase pipeline
         </p>
-        <p className="mb-4 text-sm text-muted-foreground">
-          Stage 1 (fecal detection) runs first. Stage 2 (helminth screening)
-          runs only when Stage 1 is fecal-positive. Stage 3 (species detection)
-          runs only when Stage 2 finds helminths.
+        <p className="mb-4 text-sm leading-relaxed text-muted-foreground">
+          Three sequential gates: fecal classification, helminth screening, and
+          species detection &mdash; each stage decides whether the next one runs.
         </p>
         <PipelineStepper steps={stepperStatuses} />
       </div>
@@ -934,7 +952,7 @@ export function HelminthPredictPanel({
         </div>
         <div>
           <p className="text-base font-medium text-foreground">
-            Full three-stage pipeline
+            Full three stage pipeline
           </p>
           <p className="mt-1 text-sm text-muted-foreground">
             PNG, JPEG, WebP, or TIFF · max 15 MB
@@ -1002,7 +1020,7 @@ export function HelminthPredictPanel({
                   <CardTitle className="text-base">Stage 1 result</CardTitle>
                   <CardDescription>
                     {stage1Vote
-                      ? `Fecal votes: ${stage1Vote.positiveVotes} · Non-fecal votes: ${stage1Vote.negativeVotes}`
+                      ? `Fecal votes: ${stage1Vote.positiveVotes} · Non fecal votes: ${stage1Vote.negativeVotes}`
                       : "Waiting for Stage 1 output."}
                   </CardDescription>
                 </CardHeader>
@@ -1015,7 +1033,7 @@ export function HelminthPredictPanel({
                   <CardTitle className="text-base">Stage 2 result</CardTitle>
                   <CardDescription>
                     {stage2Vote
-                      ? `Helminths votes: ${stage2Vote.positiveVotes} · Non-helminths votes: ${stage2Vote.negativeVotes}`
+                      ? `Helminth votes: ${stage2Vote.positiveVotes} · Non Helminth votes: ${stage2Vote.negativeVotes}`
                       : "Runs only when Stage 1 result is fecal."}
                   </CardDescription>
                 </CardHeader>
@@ -1027,7 +1045,7 @@ export function HelminthPredictPanel({
                 <CardHeader>
                   <CardTitle className="text-base">Stage 3 result</CardTitle>
                   <CardDescription>
-                    Bounding-box species detection when Stage 2 is helminth-positive.
+                    Bounding box species detection when Stage 2 is helminth positive.
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
@@ -1158,7 +1176,7 @@ export function HelminthPredictPanel({
                   Latest stage results
                 </CardTitle>
                 <CardDescription>
-                  Live model outputs translated into user-friendly labels.
+                  Live model outputs translated into user friendly labels.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -1212,7 +1230,7 @@ export function HelminthPredictPanel({
                                   </span>
                                   <span>
                                     <span className="font-medium text-foreground">
-                                      {String(p.class_name ?? "—")}
+                                      {String(p.class_name ?? "…")}
                                     </span>
                                     {typeof p.confidence === "number"
                                       ? ` · ${(p.confidence <= 1 ? p.confidence * 100 : p.confidence).toFixed(1)}%`
@@ -1261,13 +1279,13 @@ export function HelminthPredictPanel({
                         {" · "}
                         Confidence:{" "}
                         <span className="font-medium text-foreground">
-                          {confidence !== null ? `${confidence.toFixed(1)}%` : "—"}
+                          {confidence !== null ? `${confidence.toFixed(1)}%` : "…"}
                         </span>
                       </p>
                       {classProbabilities ? (
                         <p className="text-xs text-muted-foreground">
-                          Class probabilities: 0={String(classProbabilities["0"] ?? "—")}
-                          {" · "}1={String(classProbabilities["1"] ?? "—")}
+                          Class probabilities: 0={String(classProbabilities["0"] ?? "…")}
+                          {" · "}1={String(classProbabilities["1"] ?? "…")}
                         </p>
                       ) : null}
                     </div>

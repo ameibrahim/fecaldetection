@@ -1,6 +1,6 @@
 import { DashboardSignOut } from "@/components/dashboard-sign-out";
 import { cn } from "@/lib/utils";
-import { Home, Microscope } from "lucide-react";
+import { History, Home, Microscope } from "lucide-react";
 import Link from "next/link";
 
 type DashboardHeaderProps = {
@@ -41,10 +41,21 @@ export function DashboardHeader({ user }: DashboardHeaderProps) {
         >
           <Link
             href="/"
-            className="inline-flex items-center gap-1.5 text-sm text-foreground transition-opacity hover:opacity-80 [&_svg]:text-primary"
+            className="inline-flex min-h-9 min-w-9 items-center justify-center gap-1.5 rounded-md px-2 text-sm text-foreground transition-opacity hover:opacity-80 sm:min-w-0 sm:justify-start [&_svg]:text-primary"
           >
-            <Home className="size-3.5" aria-hidden />
+            <Home className="size-3.5 shrink-0" aria-hidden />
             <span className="hidden sm:inline">Home</span>
+          </Link>
+          <Link
+            href="/dashboard?tab=history"
+            prefetch={false}
+            aria-label="Prediction history"
+            className="inline-flex min-h-9 min-w-9 items-center justify-center gap-1.5 rounded-md px-2 text-sm text-foreground transition-opacity hover:opacity-80 sm:min-w-0 sm:justify-start [&_svg]:text-primary"
+          >
+            <History className="size-3.5 shrink-0" aria-hidden />
+            <span className="hidden sm:inline" aria-hidden>
+              History
+            </span>
           </Link>
           <span className="h-4 w-px bg-border" aria-hidden />
           <span

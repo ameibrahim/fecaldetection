@@ -216,7 +216,7 @@ function getStage1MajorityClass(run: PredictionPipelineRunRow): 0 | 1 | null {
 }
 
 function isStage1Positive(run: PredictionPipelineRunRow): boolean {
-  // Stage 1 mapping: 0 = fecal, 1 = non-fecal.
+  // Stage 1 mapping: 0 = fecal, 1 = non fecal.
   return getStage1MajorityClass(run) === 0;
 }
 
@@ -290,7 +290,7 @@ function buildVoteSummary(
   });
 
   // Class mapping in this project:
-  // Stage 1: 0=fecal, 1=non-fecal
+  // Stage 1: 0=fecal, 1=non fecal
   // Stage 2: 0=helminths, 1=non-helminths
   const positiveVotes = modelVotes.filter((v) => v.predictedClass === 0).length;
   const negativeVotes = modelVotes.filter((v) => v.predictedClass === 1).length;
@@ -652,7 +652,7 @@ export async function serviceStartPipelineStage2(
   if (!isStage1Positive(run)) {
     return {
       ok: false,
-      error: "Stage 2 cannot start because Stage 1 is non-fecal.",
+      error: "Stage 2 cannot start because Stage 1 is non fecal.",
     };
   }
 
@@ -747,7 +747,7 @@ export async function serviceStartPipelineStage3(
   if (!isStage2HelminthPositive(run)) {
     return {
       ok: false,
-      error: "Stage 3 cannot start because Stage 2 did not detect helminths.",
+      error: "Stage 3 cannot start because Stage 2 did not detect helminth.",
     };
   }
 

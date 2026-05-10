@@ -76,7 +76,7 @@ export function getStage1WsOriginForClient(): string {
   );
 }
 
-/** Browser: Grad-CAM stream for Stage 1 batch job (after prediction WS closes). */
+/** Browser: Grad CAM stream for Stage 1 batch job (after prediction WS closes). */
 export function getStage1GradcamWsUrl(jobId: string): string {
   const origin = getStage1WsOriginForClient();
   return `${origin}/ws/gradcam/${encodeURIComponent(jobId)}`;
