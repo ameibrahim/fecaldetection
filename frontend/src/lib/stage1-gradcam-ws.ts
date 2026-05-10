@@ -26,7 +26,7 @@ function asRecord(v: unknown): LooseGradcamRecord | null {
   return v !== null && typeof v === "object" ? (v as LooseGradcamRecord) : null;
 }
 
-/** Normalize one Grad-CAM / Grad-CAM-error WebSocket frame from Stage 1 API. */
+/** Normalize one Grad CAM / Grad CAM error WebSocket frame from Stage 1 API. */
 export function extractGradcamPayload(msg: unknown): {
   type?: string;
   modelKey: string | null;

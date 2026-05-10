@@ -23,15 +23,15 @@ export const viewport: Viewport = {
 
 export const metadata: Metadata = {
   title: {
-    default: "Fecal Classification — Clinical microscopy assistant",
+    default: "Fecal Classification: Clinical microscopy assistant",
     template: "%s · Fecal Classification",
   },
   description:
-    "Upload microscopic slides, run staged fecal detection, binary classification, and multi-class overlays — built for clinical workflows.",
+    "Upload microscopic slides, run staged fecal detection, binary classification, and multi class overlays, built for clinical workflows.",
   openGraph: {
     title: "Fecal Classification",
     description:
-      "AI-assisted microscopy: fecal screening, binary review, and localized multi-class findings for licensed clinicians.",
+      "AI assisted microscopy: fecal screening, binary review, and localized multi class findings for licensed clinicians.",
   },
 };
 
@@ -46,6 +46,7 @@ export default function RootLayout({
       data-scroll-behavior="smooth"
       className={`${inter.variable} ${geistMono.variable} h-full antialiased`}
       style={{ backgroundColor: CANVAS_CREAM }}
+      suppressHydrationWarning
     >
       <body
         className="min-h-full flex flex-col font-sans"

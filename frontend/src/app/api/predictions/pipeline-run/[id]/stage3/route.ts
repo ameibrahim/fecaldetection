@@ -21,7 +21,7 @@ function stage3StartErrorStatus(error: string): number {
     error.includes("already finished") ||
     error.includes("was skipped") ||
     error.includes("is not complete yet") ||
-    error.includes("did not detect helminths")
+    error.includes("did not detect helminth")
   ) {
     return 409;
   }
