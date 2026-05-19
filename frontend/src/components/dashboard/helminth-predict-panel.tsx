@@ -15,15 +15,26 @@ import { cn } from "@/lib/utils";
 import {
   STAGE1_MODEL_FILENAMES,
   getStage1GradcamWsUrl,
+  getStage1LimeWsUrl,
   getStage1WsOriginForClient,
   getStage2WsOriginForClient,
   getStage3WsOriginForClient,
 } from "@/lib/helminth-config";
 import { extractGradcamPayload } from "@/lib/stage1-gradcam-ws";
+import { extractLimePayload } from "@/lib/stage1-lime-ws";
 import {
   Stage1GradcamGrid,
   type Stage1GradcamModelEntry,
 } from "@/components/dashboard/stage1-gradcam-grid";
+import {
+  Stage1LimeCard,
+  type LimeRunEntry,
+} from "@/components/dashboard/stage1-lime-card";
+import {
+  PipelineOutcomeBanner,
+  type PipelineOutcome,
+} from "@/components/dashboard/pipeline-outcome-banner";
+import { PredictionDisclaimer } from "@/components/dashboard/prediction-disclaimer";
 import { DetectionImagePreview } from "@/components/dashboard/detection-image-preview";
 import { getDetectionPaletteEntryForClass } from "@/lib/detection-palette";
 import { buildDetectionOverlayItemsFromResults } from "@/lib/stage3-detection-overlay";
@@ -224,6 +235,11 @@ export function HelminthPredictPanel({
     connectionError: string | null;
     byModel: Record<string, Stage1GradcamModelEntry>;
   }>({ phase: "idle", connectionError: null, byModel: {} });
+  const [pipelineOutcome, setPipelineOutcome] =
+    useState<PipelineOutcome | null>(null);
+  const [stage1JobId, setStage1JobId] = useState<string | null>(null);
+  const [limeHistory, setLimeHistory] = useState<LimeRunEntry[]>([]);
+  const [limeBusy, setLimeBusy] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const gradcamWsRef = useRef<WebSocket | null>(null);
@@ -236,6 +252,9 @@ export function HelminthPredictPanel({
   const stage2StartedRef = useRef(false);
   const stage3StartedRef = useRef(false);
   const fileRef = useRef<File | null>(null);
+  const limeWsRef = useRef<WebSocket | null>(null);
+  const limePingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const limeEntryIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!file) {
@@ -313,6 +332,17 @@ export function HelminthPredictPanel({
     if (gradcamWsRef.current) {
       gradcamWsRef.current.close();
       gradcamWsRef.current = null;
+    }
+  }, []);
+
+  const teardownLimeWs = useCallback(() => {
+    if (limePingRef.current) {
+      clearInterval(limePingRef.current);
+      limePingRef.current = null;
+    }
+    if (limeWsRef.current) {
+      limeWsRef.current.close();
+      limeWsRef.current = null;
     }
   }, []);
 
@@ -602,6 +632,7 @@ export function HelminthPredictPanel({
         // Open Grad CAM in parallel with Stage 1 predictions. Connecting only after
         // `finished` is often too late (job/session closed server-side before heatmaps emit).
         if (stage === 1) {
+          setStage1JobId(externalJobId);
           connectStage1Gradcam(externalJobId);
         }
       };
@@ -626,7 +657,10 @@ export function HelminthPredictPanel({
               }
               await handleStatusResultRef.current?.(runId, data);
             })().catch((reason: unknown) => {
-              setError(reason instanceof Error ? reason.message : "Finalize failed.");
+              const message =
+                reason instanceof Error ? reason.message : "Finalize failed.";
+              setError(message);
+              setPipelineOutcome({ kind: "failed", stage, message });
               if (stage === 1) setStage1Status("idle");
               if (stage === 2) setStage2Status("idle");
               if (stage === 3) setStage3Status("idle");
@@ -791,6 +825,47 @@ export function HelminthPredictPanel({
     [applyWsPayload, finishPipeline, startStage2, startStage3],
   );
 
+  // Derive `pipelineOutcome` from terminal stage statuses + vote summaries.
+  // Failures are set explicitly in catch blocks via `setPipelineOutcome`.
+  useEffect(() => {
+    if (
+      stage3Status === "complete" &&
+      pipelineOutcome?.kind !== "stage3_complete"
+    ) {
+      const detectionCount = buildDetectionOverlayItemsFromResults(
+        preview?.results,
+      ).length;
+      setPipelineOutcome({ kind: "stage3_complete", detectionCount });
+      return;
+    }
+    if (
+      stage2Status === "complete" &&
+      stage3Status === "skipped" &&
+      stage2Vote &&
+      pipelineOutcome?.kind !== "stage2_no_helminth"
+    ) {
+      setPipelineOutcome({ kind: "stage2_no_helminth", vote: stage2Vote });
+      return;
+    }
+    if (
+      stage1Status === "complete" &&
+      stage2Status === "skipped" &&
+      stage1Vote &&
+      pipelineOutcome?.kind !== "stage1_non_fecal"
+    ) {
+      setPipelineOutcome({ kind: "stage1_non_fecal", vote: stage1Vote });
+      return;
+    }
+  }, [
+    stage1Status,
+    stage2Status,
+    stage3Status,
+    stage1Vote,
+    stage2Vote,
+    preview?.results,
+    pipelineOutcome?.kind,
+  ]);
+
   useEffect(() => {
     handleStatusResultRef.current = handleStatusResult;
   }, [handleStatusResult]);
@@ -799,28 +874,237 @@ export function HelminthPredictPanel({
     () => () => {
       teardownWs();
       teardownGradcamWs();
+      teardownLimeWs();
     },
-    [teardownWs, teardownGradcamWs],
+    [teardownWs, teardownGradcamWs, teardownLimeWs],
+  );
+
+  /**
+   * Soft client reset: tear down every open WS, clear refs, clear panel state.
+   * Used by both the "Start a new prediction" button and `onSubmit` when a new
+   * run begins. Does NOT touch auth, tabs, or any state outside this panel.
+   */
+  const resetPanelState = useCallback(
+    (opts?: { keepFile?: boolean; scroll?: boolean }) => {
+      teardownWs();
+      teardownGradcamWs();
+      teardownLimeWs();
+      stage2StartedRef.current = false;
+      stage3StartedRef.current = false;
+      runIdRef.current = null;
+      currentStageRef.current = null;
+      limeEntryIdRef.current = null;
+      setStage1JobId(null);
+      if (!opts?.keepFile) {
+        fileRef.current = null;
+        setFile(null);
+      }
+      setGradcamPanel({ phase: "idle", connectionError: null, byModel: {} });
+      setLimeHistory([]);
+      setLimeBusy(false);
+      setError(null);
+      setPreview(null);
+      setActivity([]);
+      setStage1Vote(null);
+      setStage2Vote(null);
+      setStage1Status("idle");
+      setStage2Status("idle");
+      setStage3Status("idle");
+      setProgress({ done: 0, total: 0 });
+      setLiveMessage("");
+      setPipelineOutcome(null);
+      if (opts?.scroll && typeof document !== "undefined") {
+        const target = document.getElementById("dashboard-predict-card");
+        if (target) {
+          target.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      }
+    },
+    [teardownGradcamWs, teardownLimeWs, teardownWs],
+  );
+
+  const runLime = useCallback(
+    (modelFilename: string, numSamples: number) => {
+      const jobId = stage1JobId;
+      if (!jobId) {
+        toast.error("LIME unavailable", {
+          description: "Run a Stage 1 prediction first.",
+        });
+        return;
+      }
+      if (limeBusy) return;
+
+      const clamped = Math.max(10, Math.min(1000, Math.round(numSamples)));
+      const entryId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      limeEntryIdRef.current = entryId;
+      teardownLimeWs();
+
+      const entry: LimeRunEntry = {
+        id: entryId,
+        modelFilename,
+        numSamples: clamped,
+        status: "streaming",
+        startedAt: Date.now(),
+        progressPct: null,
+      };
+      setLimeHistory((prev) => [entry, ...prev]);
+      setLimeBusy(true);
+
+      let ws: WebSocket;
+      try {
+        ws = new WebSocket(getStage1LimeWsUrl(jobId));
+      } catch {
+        setLimeHistory((prev) =>
+          prev.map((e) =>
+            e.id === entryId
+              ? { ...e, status: "error", error: "Could not open LIME connection." }
+              : e,
+          ),
+        );
+        setLimeBusy(false);
+        return;
+      }
+      limeWsRef.current = ws;
+
+      ws.onopen = () => {
+        try {
+          ws.send(
+            JSON.stringify({
+              modelFilename,
+              numSamples: clamped,
+            }),
+          );
+        } catch {
+          /* WS closed before send */
+        }
+        limePingRef.current = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) ws.send("ping");
+        }, 15000);
+      };
+
+      ws.onmessage = (evt) => {
+        try {
+          const raw = JSON.parse(String(evt.data)) as unknown;
+          const parsed = extractLimePayload(raw);
+
+          if (parsed.imageSrc) {
+            setLimeHistory((prev) =>
+              prev.map((e) =>
+                e.id === entryId
+                  ? {
+                      ...e,
+                      status: "ok",
+                      imageSrc: parsed.imageSrc!,
+                      progressPct: 100,
+                    }
+                  : e,
+              ),
+            );
+            setLimeBusy(false);
+            limeEntryIdRef.current = null;
+            queueMicrotask(() => teardownLimeWs());
+            return;
+          }
+
+          if (parsed.errorText) {
+            setLimeHistory((prev) =>
+              prev.map((e) =>
+                e.id === entryId
+                  ? { ...e, status: "error", error: parsed.errorText! }
+                  : e,
+              ),
+            );
+            setLimeBusy(false);
+            limeEntryIdRef.current = null;
+            queueMicrotask(() => teardownLimeWs());
+            return;
+          }
+
+          if (parsed.progressPct !== null) {
+            setLimeHistory((prev) =>
+              prev.map((e) =>
+                e.id === entryId
+                  ? { ...e, progressPct: parsed.progressPct }
+                  : e,
+              ),
+            );
+          }
+
+          if (parsed.isFinished) {
+            // Reached "finished" without an image: mark as error if still streaming.
+            setLimeHistory((prev) =>
+              prev.map((e) =>
+                e.id === entryId && e.status === "streaming"
+                  ? {
+                      ...e,
+                      status: "error",
+                      error: "No LIME output received.",
+                    }
+                  : e,
+              ),
+            );
+            setLimeBusy(false);
+            limeEntryIdRef.current = null;
+            queueMicrotask(() => teardownLimeWs());
+          }
+        } catch {
+          /* ignore malformed frames */
+        }
+      };
+
+      ws.onerror = () => {
+        setLimeHistory((prev) =>
+          prev.map((e) =>
+            e.id === entryId && e.status === "streaming"
+              ? {
+                  ...e,
+                  status: "error",
+                  error:
+                    "LIME connection failed. The Stage 1 job may have expired; re-run a prediction.",
+                }
+              : e,
+          ),
+        );
+        setLimeBusy(false);
+        limeEntryIdRef.current = null;
+        teardownLimeWs();
+      };
+
+      ws.onclose = () => {
+        if (limePingRef.current) {
+          clearInterval(limePingRef.current);
+          limePingRef.current = null;
+        }
+        limeWsRef.current = null;
+        // If the WS closes without ever delivering an image, surface the error
+        // and free the busy flag so the user can retry.
+        if (limeEntryIdRef.current === entryId) {
+          setLimeHistory((prev) =>
+            prev.map((e) =>
+              e.id === entryId && e.status === "streaming"
+                ? {
+                    ...e,
+                    status: "error",
+                    error:
+                      "LIME connection closed before any output. The Stage 1 job may have expired; re-run a prediction.",
+                  }
+                : e,
+            ),
+          );
+          setLimeBusy(false);
+          limeEntryIdRef.current = null;
+        }
+      };
+    },
+    [limeBusy, stage1JobId, teardownLimeWs],
   );
 
   const onSubmit = async () => {
     if (!file) return;
+    resetPanelState({ keepFile: true });
     fileRef.current = file;
-    stage2StartedRef.current = false;
-    stage3StartedRef.current = false;
-    teardownGradcamWs();
-    setGradcamPanel({ phase: "idle", connectionError: null, byModel: {} });
-    setError(null);
-    setPreview(null);
-    setActivity([]);
-    setStage1Vote(null);
-    setStage2Vote(null);
     setStage1Status("active");
-    setStage2Status("idle");
-    setStage3Status("idle");
-    setProgress({ done: 0, total: 0 });
     setLiveMessage("Uploading image and starting Stage 1…");
-    runIdRef.current = null;
 
     const fd = new FormData();
     fd.set("image", file);
@@ -849,11 +1133,14 @@ export function HelminthPredictPanel({
         connectWebSocket(data.stage.externalJobId, data.id, 2);
       }
     } catch (reason) {
+      const message =
+        reason instanceof Error ? reason.message : "Upload failed.";
       setStage1Status("idle");
       setStage2Status("idle");
       setStage3Status("idle");
-      setError(reason instanceof Error ? reason.message : "Upload failed.");
+      setError(message);
       setLiveMessage("");
+      setPipelineOutcome({ kind: "failed", stage: null, message });
     }
   };
 
@@ -923,7 +1210,7 @@ export function HelminthPredictPanel({
         <PipelineStepper steps={stepperStatuses} />
       </div>
 
-      {error && (
+      {error && pipelineOutcome?.kind !== "failed" && (
         <div
           className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
           role="alert"
@@ -1008,7 +1295,16 @@ export function HelminthPredictPanel({
         )}
       </div>
 
+      {(isRunning || pipelineOutcome !== null) && <PredictionDisclaimer />}
+
       <div className="space-y-6">
+          {pipelineOutcome && (
+            <PipelineOutcomeBanner
+              outcome={pipelineOutcome}
+              onReset={() => resetPanelState({ scroll: true })}
+            />
+          )}
+
           {(stage1Vote ||
             stage2Vote ||
             stage1Status !== "idle" ||
@@ -1062,6 +1358,24 @@ export function HelminthPredictPanel({
             connectionError={gradcamPanel.connectionError}
             byModel={gradcamPanel.byModel}
           />
+
+          {(stage1JobId || limeHistory.length > 0) && (
+            <Stage1LimeCard
+              modelFilenames={STAGE1_MODEL_FILENAMES}
+              shortName={shortModelName}
+              disabled={!stage1JobId || stage1Status === "active"}
+              disabledReason={
+                stage1Status === "active"
+                  ? "LIME is available after Stage 1 finishes."
+                  : !stage1JobId
+                    ? "Run a prediction first to enable LIME."
+                    : undefined
+              }
+              busy={limeBusy}
+              history={limeHistory}
+              onRun={runLime}
+            />
+          )}
 
           {activity.length > 0 && (
             <Card className="border-border/80">
