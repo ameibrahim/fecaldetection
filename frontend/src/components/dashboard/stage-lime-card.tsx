@@ -24,7 +24,9 @@ export type LimeRunEntry = {
   progressPct?: number | null;
 };
 
-export type Stage1LimeCardProps = {
+export type StageLimeCardProps = {
+  /** Title prefix, e.g. "Stage 1" or "Stage 2". */
+  stageLabel: string;
   modelFilenames: readonly string[];
   shortName: (filename: string) => string;
   disabled: boolean;
@@ -54,7 +56,8 @@ function formatTime(ms: number): string {
   });
 }
 
-export function Stage1LimeCard({
+export function StageLimeCard({
+  stageLabel,
   modelFilenames,
   shortName,
   disabled,
@@ -62,7 +65,7 @@ export function Stage1LimeCard({
   history,
   onRun,
   disabledReason,
-}: Stage1LimeCardProps) {
+}: StageLimeCardProps) {
   const [model, setModel] = useState<string>(modelFilenames[0] ?? "");
   const [samples, setSamples] = useState<number>(DEFAULT_SAMPLES);
   const [lightbox, setLightbox] = useState<{ src: string; title: string } | null>(
@@ -99,10 +102,10 @@ export function Stage1LimeCard({
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
             <Lightbulb className="size-4 text-amber-500" aria-hidden />
-            LIME explanations (optional)
+            {stageLabel} &middot; LIME explanations (optional)
           </CardTitle>
           <CardDescription>
-            Run LIME on a Stage 1 model to see which image regions drove its
+            Run LIME on a {stageLabel} model to see which image regions drove its
             decision. Heatmaps are explainability only, not a diagnosis.
           </CardDescription>
         </CardHeader>
@@ -110,7 +113,7 @@ export function Stage1LimeCard({
           <div className="rounded-xl border border-border/60 bg-muted/15 p-3.5">
             <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
               <label className="flex min-w-0 flex-col gap-1 text-xs text-muted-foreground">
-                <span>Stage 1 model</span>
+                <span>{stageLabel} model</span>
                 <select
                   className={selectClass}
                   value={effectiveModel}

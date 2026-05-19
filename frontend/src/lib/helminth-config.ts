@@ -96,6 +96,19 @@ export function getStage2WsOriginForClient(): string {
   );
 }
 
+/** Browser: Grad CAM stream for Stage 2 batch job. */
+export function getStage2GradcamWsUrl(jobId: string): string {
+  const origin = getStage2WsOriginForClient();
+  return `${origin}/ws/gradcam/${encodeURIComponent(jobId)}`;
+}
+
+/** Browser: LIME explanation stream for Stage 2 batch job. Client must send
+ *  `{modelFilename, numSamples}` once the WS opens. */
+export function getStage2LimeWsUrl(jobId: string): string {
+  const origin = getStage2WsOriginForClient();
+  return `${origin}/ws/lime/${encodeURIComponent(jobId)}`;
+}
+
 /** Browser: WebSocket origin for Stage 3 remote job. */
 export function getStage3WsOriginForClient(): string {
   return trimTrailingSlash(

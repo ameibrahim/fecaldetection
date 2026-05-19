@@ -1,3 +1,4 @@
+import { ExplanationsTabs } from "@/components/dashboard/explanations-tabs";
 import { RunDetailActions } from "@/components/dashboard/run-detail-actions";
 import { RunDetailImage } from "@/components/dashboard/run-detail-image";
 import { buttonVariants } from "@/components/ui/button-variants";
@@ -173,6 +174,16 @@ export default async function DashboardHistoryRunPage({
             </div>
           ))}
         </div>
+
+        <ExplanationsTabs
+          runId={run.id}
+          stage1Status={run.stage1_status}
+          stage2Status={run.stage2_status}
+          stage1Gradcam={run.stage1_gradcam_artifacts}
+          stage1Lime={run.stage1_lime_artifacts}
+          stage2Gradcam={run.stage2_gradcam_artifacts}
+          stage2Lime={run.stage2_lime_artifacts}
+        />
 
         {run.stage3_annotated_image_object_key ? (
           <section className="mt-8 space-y-2">
