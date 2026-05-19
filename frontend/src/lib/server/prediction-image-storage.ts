@@ -90,6 +90,56 @@ export function buildStage3AnnotatedObjectKey(params: {
   return `users/${userSegment}/runs/${runSegment}/stage3-annotated.png`;
 }
 
+export type ExplanationKind = "gradcam" | "lime";
+export type ExplanationStage = 1 | 2;
+
+/**
+ * GradCAM keys are deterministic per (run, stage, model) so re-uploads
+ * overwrite. LIME keys include a timestamp + sample count so each run gets a
+ * distinct object.
+ */
+export function buildExplanationObjectKey(params: {
+  userId: string;
+  runId: string;
+  stage: ExplanationStage;
+  kind: ExplanationKind;
+  modelFilename: string;
+  /** Required for LIME, ignored for GradCAM. */
+  numSamples?: number;
+  /** Required for LIME, ignored for GradCAM. */
+  createdAtMs?: number;
+}): string {
+  const userSegment = sanitizePathSegment(params.userId);
+  const runSegment = sanitizePathSegment(params.runId);
+  const modelSlug = sanitizePathSegment(
+    params.modelFilename.replace(/\.(keras|pt)$/i, ""),
+  );
+  const prefix = `users/${userSegment}/runs/${runSegment}/explanations/stage${params.stage}`;
+  if (params.kind === "gradcam") {
+    return `${prefix}/gradcam/${modelSlug}.png`;
+  }
+  const ts = Math.floor((params.createdAtMs ?? Date.now()) / 1000);
+  const samples = Math.max(0, Math.floor(params.numSamples ?? 0));
+  return `${prefix}/lime/${modelSlug}-${ts}-${samples}.png`;
+}
+
+export async function uploadExplanationArtifact(params: {
+  objectKey: string;
+  body: Buffer;
+  contentType?: string;
+}): Promise<void> {
+  const client = getR2Client();
+  await client.send(
+    new PutObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: params.objectKey,
+      Body: params.body,
+      ContentType: params.contentType ?? "image/png",
+      ContentLength: params.body.byteLength,
+    }),
+  );
+}
+
 export async function streamWebBodyToBuffer(
   stream: ReadableStream<Uint8Array>,
 ): Promise<Buffer> {

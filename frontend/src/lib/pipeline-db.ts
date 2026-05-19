@@ -20,6 +20,19 @@ export type VoteSummary = {
   }>;
 };
 
+export type GradcamArtifactEntry = {
+  modelFilename: string;
+  objectKey: string;
+  createdAt: string;
+};
+
+export type LimeArtifactEntry = {
+  modelFilename: string;
+  objectKey: string;
+  numSamples: number;
+  createdAt: string;
+};
+
 export type PredictionPipelineRunRow = {
   id: string;
   user_id: string;
@@ -40,6 +53,10 @@ export type PredictionPipelineRunRow = {
   stage3_annotated_image_object_key: string | null;
   stage1_vote_summary: VoteSummary | null;
   stage2_vote_summary: VoteSummary | null;
+  stage1_gradcam_artifacts: GradcamArtifactEntry[];
+  stage1_lime_artifacts: LimeArtifactEntry[];
+  stage2_gradcam_artifacts: GradcamArtifactEntry[];
+  stage2_lime_artifacts: LimeArtifactEntry[];
   final_outcome: string | null;
   error_message: string | null;
 };
@@ -291,6 +308,10 @@ export async function getPipelineRunForUser(
            stage1_result_payload, stage2_result_payload, stage3_result_payload,
            stage3_annotated_image_object_key,
            stage1_vote_summary, stage2_vote_summary,
+           COALESCE(stage1_gradcam_artifacts, '[]'::jsonb) AS stage1_gradcam_artifacts,
+           COALESCE(stage1_lime_artifacts,    '[]'::jsonb) AS stage1_lime_artifacts,
+           COALESCE(stage2_gradcam_artifacts, '[]'::jsonb) AS stage2_gradcam_artifacts,
+           COALESCE(stage2_lime_artifacts,    '[]'::jsonb) AS stage2_lime_artifacts,
            final_outcome, error_message
     FROM prediction_pipeline_runs
     WHERE id = ${runId}::uuid AND user_id = ${userId}
@@ -313,6 +334,10 @@ export async function listPipelineHistory(
            stage1_result_payload, stage2_result_payload, stage3_result_payload,
            stage3_annotated_image_object_key,
            stage1_vote_summary, stage2_vote_summary,
+           COALESCE(stage1_gradcam_artifacts, '[]'::jsonb) AS stage1_gradcam_artifacts,
+           COALESCE(stage1_lime_artifacts,    '[]'::jsonb) AS stage1_lime_artifacts,
+           COALESCE(stage2_gradcam_artifacts, '[]'::jsonb) AS stage2_gradcam_artifacts,
+           COALESCE(stage2_lime_artifacts,    '[]'::jsonb) AS stage2_lime_artifacts,
            final_outcome, error_message
     FROM prediction_pipeline_runs
     WHERE user_id = ${userId}
@@ -321,6 +346,63 @@ export async function listPipelineHistory(
     OFFSET ${offset}
   `;
   return rows as PredictionPipelineRunRow[];
+}
+
+/**
+ * Append an explanation artifact entry to the appropriate per-stage JSONB array.
+ * GradCAM entries are de-duplicated by `objectKey` (so re-uploads on the same
+ * deterministic model slug do not bloat the array).
+ */
+export async function appendStageExplanationArtifact(params: {
+  runId: string;
+  userId: string;
+  stage: 1 | 2;
+  kind: "gradcam" | "lime";
+  entry: GradcamArtifactEntry | LimeArtifactEntry;
+}): Promise<void> {
+  const sql = getSql();
+  const entryJson = JSON.stringify(params.entry);
+  if (params.stage === 1 && params.kind === "gradcam") {
+    await sql`
+      UPDATE prediction_pipeline_runs
+      SET stage1_gradcam_artifacts = (
+            SELECT COALESCE(jsonb_agg(elem), '[]'::jsonb)
+            FROM jsonb_array_elements(COALESCE(stage1_gradcam_artifacts, '[]'::jsonb)) AS elem
+            WHERE elem->>'objectKey' <> ${params.entry.objectKey}
+          ) || ${entryJson}::jsonb,
+          updated_at = now()
+      WHERE id = ${params.runId}::uuid AND user_id = ${params.userId}
+    `;
+    return;
+  }
+  if (params.stage === 1 && params.kind === "lime") {
+    await sql`
+      UPDATE prediction_pipeline_runs
+      SET stage1_lime_artifacts = COALESCE(stage1_lime_artifacts, '[]'::jsonb) || ${entryJson}::jsonb,
+          updated_at = now()
+      WHERE id = ${params.runId}::uuid AND user_id = ${params.userId}
+    `;
+    return;
+  }
+  if (params.stage === 2 && params.kind === "gradcam") {
+    await sql`
+      UPDATE prediction_pipeline_runs
+      SET stage2_gradcam_artifacts = (
+            SELECT COALESCE(jsonb_agg(elem), '[]'::jsonb)
+            FROM jsonb_array_elements(COALESCE(stage2_gradcam_artifacts, '[]'::jsonb)) AS elem
+            WHERE elem->>'objectKey' <> ${params.entry.objectKey}
+          ) || ${entryJson}::jsonb,
+          updated_at = now()
+      WHERE id = ${params.runId}::uuid AND user_id = ${params.userId}
+    `;
+    return;
+  }
+  await sql`
+    UPDATE prediction_pipeline_runs
+    SET stage2_lime_artifacts = COALESCE(stage2_lime_artifacts, '[]'::jsonb) || ${entryJson}::jsonb,
+        updated_at = now()
+    WHERE id = ${params.runId}::uuid AND user_id = ${params.userId}
+  `;
 }
 
 export async function getPipelineDashboardStats(userId: string): Promise<{

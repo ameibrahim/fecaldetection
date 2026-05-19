@@ -13,33 +13,35 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { AlertCircle, ImageIcon, Maximize2, X } from "lucide-react";
 
-export type Stage1GradcamModelEntry = {
+export type GradcamModelEntry = {
   status: "pending" | "ok" | "error";
   imageSrc?: string;
   error?: string;
 };
 
-export type Stage1GradcamPanelPhase = "idle" | "loading" | "complete" | "error";
+export type StageGradcamPanelPhase = "idle" | "loading" | "complete" | "error";
 
-export type Stage1GradcamGridProps = {
+export type StageGradcamGridProps = {
+  /** Title prefix, e.g. "Stage 1" or "Stage 2". */
+  stageLabel: string;
   modelFilenames: readonly string[];
   shortName: (filename: string) => string;
-  phase: Stage1GradcamPanelPhase;
+  phase: StageGradcamPanelPhase;
   connectionError: string | null;
-  byModel: Record<string, Stage1GradcamModelEntry>;
+  byModel: Record<string, GradcamModelEntry>;
 };
 
-/** Same image sizing as `prediction-history-card.tsx` detail slide. */
 const HISTORY_DETAIL_IMG_CLASS =
   "relative z-10 mx-auto block h-auto max-h-[min(70vh,560px)] w-full rounded-lg border border-border/60 object-contain";
 
-export function Stage1GradcamGrid({
+export function StageGradcamGrid({
+  stageLabel,
   modelFilenames,
   shortName,
   phase,
   connectionError,
   byModel,
-}: Stage1GradcamGridProps) {
+}: StageGradcamGridProps) {
   const [lightbox, setLightbox] = useState<{
     src: string;
     title: string;
@@ -70,10 +72,12 @@ export function Stage1GradcamGrid({
     <>
       <Card className="border-border/80">
         <CardHeader>
-          <CardTitle className="text-base">Stage 1 · model attention (Grad CAM)</CardTitle>
+          <CardTitle className="text-base">
+            {stageLabel} &middot; model attention (Grad CAM)
+          </CardTitle>
           <CardDescription>
-            Heatmaps show where each fecal detection model focuses on your image. Not a
-            diagnosis, explainability only. Tap a heatmap to enlarge it.
+            Heatmaps show where each model focuses on your image. Not a diagnosis,
+            explainability only. Tap a heatmap to enlarge it.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
