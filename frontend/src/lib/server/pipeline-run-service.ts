@@ -11,27 +11,40 @@ import {
   getStage2ApiBaseUrl,
   getStage3ApiBaseUrl,
 } from "@/lib/helminth-config";
+import { isValidImageHashHex } from "@/lib/image-hash";
+import { getPipelineVersionKey } from "@/lib/pipeline-version";
 import {
   assertCanStartPipelineRun,
+  findCacheSignature,
+  findIdempotencyRun,
+  getPipelineRunById,
   getPipelineRunForUser,
   getPipelineDashboardStats,
+  insertCachedPipelineRun,
+  insertIdempotencyKey,
   insertPipelineRun,
   listPipelineHistory,
   markPipelineRunFailed,
+  recordCacheSignatureHit,
   saveStage1Result,
   saveStage2Result,
   saveStage3Result,
   updatePipelineRunImageObjectKey,
   updateStage1ExternalJobId,
   updateStage2ExternalJobId,
+  setStage1ExternalJobIdForExplanations,
+  setStage2ExternalJobIdForExplanations,
   updateStage3ExternalJobId,
+  upsertCacheSignature,
   type PipelineRunStatus,
+  type PredictionCacheSignatureRow,
   type PredictionPipelineRunRow,
   type VoteSummary,
 } from "@/lib/pipeline-db";
 import {
   buildPredictionImageObjectKey,
   buildStage3AnnotatedObjectKey,
+  copyPredictionImage,
   deletePredictionImage,
   getPredictionImage,
   streamWebBodyToBuffer,
@@ -61,12 +74,41 @@ export type PipelineErr = { ok: false; error: string; code?: string };
 
 export type PipelineSubmitOk = {
   ok: true;
+  cached?: false;
   id: string;
   stage: {
     stage: StageNumber;
     externalJobId: string;
     totalModels: number;
   };
+  idempotent?: boolean;
+};
+
+/** Returned when an identical image + pipeline version was predicted before. */
+export type PipelineCachedOk = {
+  ok: true;
+  cached: true;
+  id: string;
+  finalOutcome: string | null;
+  cacheSourceCreatedAt: string | null;
+  stage1Status: PredictionPipelineRunRow["stage1_status"];
+  stage2Status: PredictionPipelineRunRow["stage2_status"];
+  stage3Status: PredictionPipelineRunRow["stage3_status"];
+  stage1VoteSummary: VoteSummary | null;
+  stage2VoteSummary: VoteSummary | null;
+  stage1ResultPayload: unknown | null;
+  stage2ResultPayload: unknown | null;
+  stage3ResultPayload: unknown | null;
+  hasStage3AnnotatedImage: boolean;
+  idempotent?: boolean;
+};
+
+export type PipelineSubmitResult = PipelineSubmitOk | PipelineCachedOk;
+
+export type PipelineSubmitOptions = {
+  imageHash?: string;
+  forceRerun?: boolean;
+  idempotencyKey?: string;
 };
 
 export type PipelineStage2StartOk = {
@@ -260,6 +302,162 @@ function persistedPayload(run: PredictionPipelineRunRow): Record<string, unknown
   return undefined;
 }
 
+function cachedOkFromRun(
+  run: PredictionPipelineRunRow,
+  extra?: { idempotent?: boolean },
+): PipelineCachedOk {
+  return {
+    ok: true,
+    cached: true,
+    id: run.id,
+    finalOutcome: run.final_outcome,
+    cacheSourceCreatedAt: run.cache_source_run_id ? run.created_at : null,
+    stage1Status: run.stage1_status,
+    stage2Status: run.stage2_status,
+    stage3Status: run.stage3_status,
+    stage1VoteSummary: run.stage1_vote_summary,
+    stage2VoteSummary: run.stage2_vote_summary,
+    stage1ResultPayload: run.stage1_result_payload,
+    stage2ResultPayload: run.stage2_result_payload,
+    stage3ResultPayload: run.stage3_result_payload,
+    hasStage3AnnotatedImage: Boolean(run.stage3_annotated_image_object_key),
+    idempotent: extra?.idempotent,
+  };
+}
+
+async function writeCacheIfEligible(
+  run: PredictionPipelineRunRow,
+): Promise<void> {
+  if (run.status !== "finished" || run.cache_hit || !run.image_hash) return;
+  if (!run.final_outcome || !run.stage1_result_payload) return;
+
+  try {
+    await upsertCacheSignature({
+      imageHash: run.image_hash,
+      pipelineVersionKey: getPipelineVersionKey(),
+      stage1ResultPayload: run.stage1_result_payload,
+      stage1VoteSummary: run.stage1_vote_summary,
+      stage2ResultPayload: run.stage2_result_payload,
+      stage2VoteSummary: run.stage2_vote_summary,
+      stage3ResultPayload: run.stage3_result_payload,
+      finalOutcome: run.final_outcome,
+      sourceRunId: run.id,
+    });
+  } catch {
+    /* Cache write failure must not break the user-facing run. */
+  }
+}
+
+async function submitFromCache(
+  userId: string,
+  file: File,
+  imageHash: string,
+  signature: PredictionCacheSignatureRow,
+): Promise<PipelineCachedOk | PipelineErr> {
+  const validationErr = fileValidationError(file);
+  if (validationErr) {
+    return { ok: false, error: validationErr };
+  }
+
+  try {
+    await assertCanStartPipelineRun(userId);
+  } catch (reason) {
+    return { ok: false, error: runError(reason), code: "429" };
+  }
+
+  const runId = crypto.randomUUID();
+  const imageObjectKey = buildPredictionImageObjectKey({
+    userId,
+    runId,
+    mimeType: file.type || "application/octet-stream",
+  });
+
+  let stage3AnnotatedImageObjectKey: string | null = null;
+  if (
+    signature.final_outcome === "helminth_positive" &&
+    signature.source_run_id
+  ) {
+    const sourceRun = await getPipelineRunById(signature.source_run_id);
+    const sourceKey = sourceRun?.stage3_annotated_image_object_key;
+    if (sourceKey) {
+      const destKey = buildStage3AnnotatedObjectKey({ userId, runId });
+      try {
+        await copyPredictionImage({ sourceKey, destKey });
+        stage3AnnotatedImageObjectKey = destKey;
+      } catch {
+        /* Optional asset */
+      }
+    }
+  }
+
+  try {
+    await uploadPredictionImage({ objectKey: imageObjectKey, file });
+    await insertCachedPipelineRun({
+      userId,
+      runId,
+      originalFilename: file.name || null,
+      imageObjectKey,
+      imageHash,
+      cacheSourceRunId: signature.source_run_id,
+      signature,
+      stage3AnnotatedImageObjectKey,
+    });
+    await recordCacheSignatureHit(imageHash, signature.pipeline_version_key);
+  } catch (reason) {
+    return { ok: false, error: dbErrorMessage(reason) };
+  }
+
+  const run = await getPipelineRunForUser(runId, userId);
+  if (!run) {
+    return { ok: false, error: "Could not load cached run after insert." };
+  }
+  return cachedOkFromRun(run);
+}
+
+async function buildSubmitResponseFromExistingRun(
+  run: PredictionPipelineRunRow,
+): Promise<PipelineSubmitResult | PipelineErr> {
+  if (run.status === "finished") {
+    return cachedOkFromRun(run, { idempotent: true });
+  }
+  if (run.status === "processing") {
+    const stage =
+      run.stage3_status === "processing"
+        ? 3
+        : run.stage2_status === "processing"
+          ? 2
+          : run.stage1_status === "processing"
+            ? 1
+            : null;
+    const externalJobId =
+      stage === 1
+        ? run.stage1_external_job_id
+        : stage === 2
+          ? run.stage2_external_job_id
+          : stage === 3
+            ? run.stage3_external_job_id
+            : null;
+    if (stage && externalJobId) {
+      return {
+        ok: true,
+        id: run.id,
+        stage: {
+          stage,
+          externalJobId,
+          totalModels:
+            stage === 1
+              ? STAGE1_MODEL_FILENAMES.length
+              : stage === 2
+                ? STAGE2_MODEL_FILENAMES.length
+                : STAGE3_MODEL_FILENAMES.length,
+        },
+        idempotent: true,
+      };
+    }
+  }
+  return { ok: false, error: "Previous run is not resumable." };
+}
+
 function buildVoteSummary(
   payload: HelminthStatusPayload,
   expectedModelFilenames: readonly string[],
@@ -391,6 +589,10 @@ async function saveFinishedStage1(params: {
     voteSummary,
     isFecal,
   });
+  if (!isFecal) {
+    const updated = await getPipelineRunForUser(params.run.id, params.userId);
+    if (updated) await writeCacheIfEligible(updated);
+  }
   return {
     runStatus: isFecal ? "processing" : "finished",
     gateDecision: isFecal ? "fecal" : "non_fecal",
@@ -420,6 +622,10 @@ async function saveFinishedStage2(params: {
     finalOutcome,
     awaitStage3,
   });
+  if (!awaitStage3) {
+    const updated = await getPipelineRunForUser(params.run.id, params.userId);
+    if (updated) await writeCacheIfEligible(updated);
+  }
   return {
     runStatus: awaitStage3 ? "processing" : "finished",
     awaitingStage3Start: awaitStage3,
@@ -467,6 +673,8 @@ async function saveFinishedStage3(params: {
     payload: params.remote,
     annotatedImageObjectKey,
   });
+  const updated = await getPipelineRunForUser(params.run.id, params.userId);
+  if (updated) await writeCacheIfEligible(updated);
   return { runStatus: "finished" };
 }
 
@@ -474,6 +682,7 @@ async function startRun(
   userId: string,
   file: File,
   mode: StartMode,
+  imageHash?: string | null,
 ): Promise<PipelineSubmitOk | PipelineErr> {
   const validationErr = fileValidationError(file);
   if (validationErr) {
@@ -505,6 +714,7 @@ async function startRun(
       runId,
       originalFilename: file.name || null,
       imageObjectKey: null,
+      imageHash: imageHash ?? null,
       stage1Status: stage === 1 ? "processing" : "skipped",
       stage2Status: stage === 1 ? "pending" : "processing",
       stage3Status: stage === 1 ? "pending" : "skipped",
@@ -522,6 +732,7 @@ async function startRun(
       runId,
       userId,
       imageObjectKey,
+      imageHash: imageHash ?? null,
     });
   } catch (reason) {
     const message = `Could not store uploaded image: ${runError(reason)}`;
@@ -596,8 +807,64 @@ async function startRun(
 export async function serviceSubmitPipelineRun(
   userId: string,
   file: File,
-): Promise<PipelineSubmitOk | PipelineErr> {
-  return startRun(userId, file, "pipeline");
+  options?: PipelineSubmitOptions,
+): Promise<PipelineSubmitResult | PipelineErr> {
+  if (options?.idempotencyKey) {
+    const existingRunId = await findIdempotencyRun(
+      userId,
+      options.idempotencyKey,
+    );
+    if (existingRunId) {
+      const existingRun = await getPipelineRunForUser(existingRunId, userId);
+      if (existingRun) {
+        return buildSubmitResponseFromExistingRun(existingRun);
+      }
+    }
+  }
+
+  const imageHash = options?.imageHash;
+  if (
+    imageHash &&
+    isValidImageHashHex(imageHash) &&
+    !options?.forceRerun
+  ) {
+    const signature = await findCacheSignature(
+      imageHash,
+      getPipelineVersionKey(),
+    );
+    if (signature) {
+      const cached = await submitFromCache(userId, file, imageHash, signature);
+      if (cached.ok && options?.idempotencyKey) {
+        await insertIdempotencyKey({
+          userId,
+          key: options.idempotencyKey,
+          runId: cached.id,
+        });
+      }
+      if (cached.ok) {
+        return {
+          ...cached,
+          cacheSourceCreatedAt: signature.created_at,
+        };
+      }
+      return cached;
+    }
+  }
+
+  const result = await startRun(
+    userId,
+    file,
+    "pipeline",
+    imageHash && isValidImageHashHex(imageHash) ? imageHash : null,
+  );
+  if (result.ok && options?.idempotencyKey) {
+    await insertIdempotencyKey({
+      userId,
+      key: options.idempotencyKey,
+      runId: result.id,
+    });
+  }
+  return result;
 }
 
 export async function serviceSubmitStage2OnlyRun(
@@ -706,6 +973,7 @@ export async function serviceStartPipelineStage3(
   userId: string,
   runId: string,
   file: File,
+  modelFilename: string,
 ): Promise<PipelineStage3StartOk | PipelineErr> {
   const validationErr = fileValidationError(file);
   if (validationErr) {
@@ -721,6 +989,10 @@ export async function serviceStartPipelineStage3(
     return { ok: false, error: "Run is not in processing state." };
   }
 
+  if (!(STAGE3_MODEL_FILENAMES as readonly string[]).includes(modelFilename)) {
+    return { ok: false, error: "Unknown Stage 3 model." };
+  }
+
   if (run.stage3_status === "processing" && run.stage3_external_job_id) {
     return {
       ok: true,
@@ -728,7 +1000,7 @@ export async function serviceStartPipelineStage3(
       stage: {
         stage: 3,
         externalJobId: run.stage3_external_job_id,
-        totalModels: STAGE3_MODEL_FILENAMES.length,
+        totalModels: 1,
       },
     };
   }
@@ -757,7 +1029,7 @@ export async function serviceStartPipelineStage3(
       apiBaseUrl: getStage3ApiBaseUrl(),
       file,
       modelInputFeatureSize: STAGE3_MODEL_INPUT_SIZE,
-      modelFilenames: STAGE3_MODEL_FILENAMES,
+      modelFilenames: [modelFilename],
     });
   } catch (reason) {
     const message = runError(reason);
@@ -775,6 +1047,7 @@ export async function serviceStartPipelineStage3(
       runId,
       userId,
       externalJobId: batch.externalJobId,
+      modelFilename,
     });
   } catch (reason) {
     const message = runError(reason);
@@ -1104,4 +1377,96 @@ export async function serviceGetPipelineStats(
   } catch (reason) {
     return { ok: false, error: dbErrorMessage(reason) };
   }
+}
+
+async function fetchRunImageAsFile(
+  run: PredictionPipelineRunRow,
+): Promise<File | null> {
+  if (!run.image_object_key) return null;
+  const stored = await getPredictionImage(run.image_object_key);
+  if (!stored?.body) return null;
+  const buf = await streamWebBodyToBuffer(stored.body);
+  return new File([new Uint8Array(buf)], run.original_filename ?? "upload.jpg", {
+    type: stored.contentType || "application/octet-stream",
+  });
+}
+
+export type ExplanationsStartOk = {
+  ok: true;
+  stage1?: { externalJobId: string; totalModels: number };
+  stage2?: { externalJobId: string; totalModels: number };
+};
+
+/** Start remote batch jobs for GradCAM/LIME on a finished (or cached) run. */
+export async function serviceStartExplanations(
+  userId: string,
+  runId: string,
+): Promise<ExplanationsStartOk | PipelineErr> {
+  const run = await getPipelineRunForUser(runId, userId);
+  if (!run) {
+    return { ok: false, error: "Not found." };
+  }
+  if (run.status !== "finished") {
+    return { ok: false, error: "Run must be finished before generating explanations." };
+  }
+
+  const file = await fetchRunImageAsFile(run);
+  if (!file) {
+    return { ok: false, error: "Stored image is missing for this run." };
+  }
+
+  const out: ExplanationsStartOk = { ok: true };
+
+  if (run.stage1_status === "finished") {
+    try {
+      const batch = await startRemoteBatch({
+        apiBaseUrl: getStage1ApiBaseUrl(),
+        file,
+        modelInputFeatureSize: STAGE1_MODEL_INPUT_SIZE,
+        modelFilenames: STAGE1_MODEL_FILENAMES,
+      });
+      await setStage1ExternalJobIdForExplanations({
+        runId: run.id,
+        userId,
+        externalJobId: batch.externalJobId,
+      });
+      out.stage1 = {
+        externalJobId: batch.externalJobId,
+        totalModels: batch.totalModels,
+      };
+    } catch (reason) {
+      return { ok: false, error: runError(reason) };
+    }
+  }
+
+  if (run.stage2_status === "finished") {
+    try {
+      const batch = await startRemoteBatch({
+        apiBaseUrl: getStage2ApiBaseUrl(),
+        file,
+        modelInputFeatureSize: STAGE2_MODEL_INPUT_SIZE,
+        modelFilenames: STAGE2_MODEL_FILENAMES,
+      });
+      await setStage2ExternalJobIdForExplanations({
+        runId: run.id,
+        userId,
+        externalJobId: batch.externalJobId,
+      });
+      out.stage2 = {
+        externalJobId: batch.externalJobId,
+        totalModels: batch.totalModels,
+      };
+    } catch (reason) {
+      return { ok: false, error: runError(reason) };
+    }
+  }
+
+  if (!out.stage1 && !out.stage2) {
+    return {
+      ok: false,
+      error: "No explanation stages are available for this run.",
+    };
+  }
+
+  return out;
 }

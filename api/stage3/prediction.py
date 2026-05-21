@@ -5,7 +5,7 @@ from typing import Dict
 
 import requests
 from PIL import Image
-from ultralytics import RTDETR
+from ultralytics import RTDETR, YOLO
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,11 @@ def load_image_from_url(image_url: str) -> Image.Image:
 
 
 def predict_with_model_file(source_image: Image.Image, model_path: Path, size: int) -> Dict[str, object]:
-    model = RTDETR(str(model_path))
+    name_lower = model_path.name.lower()
+    if "yolo" in name_lower:
+        model = YOLO(str(model_path))
+    else:
+        model = RTDETR(str(model_path))
     results = model.predict(source_image, imgsz=size, conf=0.25, save=False)
 
     predictions = []

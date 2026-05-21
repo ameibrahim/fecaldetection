@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { resolvePredictionUserId } from "@/lib/prediction-api-auth";
+import { STAGE3_MODEL_FILENAMES } from "@/lib/helminth-config";
 import { serviceStartPipelineStage3 } from "@/lib/server/pipeline-run-service";
 
 export const runtime = "nodejs";
@@ -12,7 +13,9 @@ function stage3StartErrorStatus(error: string): number {
     error === "Empty file." ||
     error.startsWith("File too large") ||
     error.startsWith("Unsupported image type") ||
-    error === "Missing image file (form field: image)."
+    error === "Missing image file (form field: image)." ||
+    error === "Unknown Stage 3 model." ||
+    error === "Missing modelFilename."
   ) {
     return 400;
   }
@@ -52,8 +55,16 @@ export async function POST(request: Request, context: RouteParams) {
       );
     }
 
+    const modelFilename = String(formData.get("modelFilename") ?? "").trim();
+    if (!modelFilename || !(STAGE3_MODEL_FILENAMES as readonly string[]).includes(modelFilename)) {
+      return NextResponse.json(
+        { error: "Missing or invalid modelFilename." },
+        { status: 400 },
+      );
+    }
+
     const { id } = await context.params;
-    const result = await serviceStartPipelineStage3(userId, id, image);
+    const result = await serviceStartPipelineStage3(userId, id, image, modelFilename);
     if (!result.ok) {
       return NextResponse.json(
         { error: result.error },

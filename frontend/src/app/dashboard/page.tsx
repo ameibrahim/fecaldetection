@@ -1,4 +1,5 @@
 import { DashboardHero } from "@/components/dashboard/dashboard-hero";
+import { PredictionDisclaimer } from "@/components/dashboard/prediction-disclaimer";
 import { DashboardLiveStats } from "@/components/dashboard/dashboard-live-stats";
 import { DashboardPipelineTimeline } from "@/components/dashboard/dashboard-pipeline-timeline";
 import { DashboardTabs } from "@/components/dashboard/dashboard-tabs";
@@ -28,7 +29,7 @@ export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   title: "Dashboard",
-  description: "Clinician workspace for fecal microscopy classification.",
+  description: "Clinician workspace for helminth microscopy detection.",
 };
 
 const HISTORY_INITIAL_LIMIT = 30;
@@ -86,6 +87,8 @@ export default async function DashboardPage({
     <main className="flex-1 bg-muted/10">
       <div className="mx-auto max-w-6xl space-y-8 px-4 py-8 sm:px-6 sm:py-10 lg:px-8">
         <DashboardHero userName={user?.name ?? null} runsThisWeek={runsThisWeek} />
+
+        <PredictionDisclaimer />
 
         <DashboardLiveStats
           initialStats={stats}

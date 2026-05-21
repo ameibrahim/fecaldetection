@@ -7,6 +7,7 @@ import {
 import {
   STAGE1_MODEL_FILENAMES,
   STAGE2_MODEL_FILENAMES,
+  STAGE3_MODEL_FILENAMES,
 } from "@/lib/helminth-config";
 import {
   buildExplanationObjectKey,
@@ -33,16 +34,22 @@ export async function POST(request: Request, context: RouteParams) {
 
     const form = await request.formData();
     const rawStage = String(form.get("stage") ?? "");
-    const stage = rawStage === "1" ? 1 : rawStage === "2" ? 2 : null;
+    const stage =
+      rawStage === "1" ? 1 : rawStage === "2" ? 2 : rawStage === "3" ? 3 : null;
     if (stage === null) {
       return NextResponse.json(
-        { error: "Invalid stage (must be '1' or '2')." },
+        { error: "Invalid stage (must be '1', '2', or '3')." },
         { status: 400 },
       );
     }
 
     const modelFilename = String(form.get("modelFilename") ?? "");
-    const allowed = stage === 1 ? STAGE1_MODEL_FILENAMES : STAGE2_MODEL_FILENAMES;
+    const allowed =
+      stage === 1
+        ? STAGE1_MODEL_FILENAMES
+        : stage === 2
+          ? STAGE2_MODEL_FILENAMES
+          : STAGE3_MODEL_FILENAMES;
     if (!modelFilename || !(allowed as readonly string[]).includes(modelFilename)) {
       return NextResponse.json(
         { error: "Unknown modelFilename for this stage." },

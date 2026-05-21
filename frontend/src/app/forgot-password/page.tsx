@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic";
 export const metadata: Metadata = {
   title: "Forgot password",
   description:
-    "Request a link to reset your Fecal Classification account password.",
+    "Request a link to reset your Helminth Detection account password.",
 };
 
 export default async function ForgotPasswordPage() {

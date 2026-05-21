@@ -1,4 +1,5 @@
 import {
+  CopyObjectCommand,
   DeleteObjectCommand,
   GetObjectCommand,
   PutObjectCommand,
@@ -91,7 +92,7 @@ export function buildStage3AnnotatedObjectKey(params: {
 }
 
 export type ExplanationKind = "gradcam" | "lime";
-export type ExplanationStage = 1 | 2;
+export type ExplanationStage = 1 | 2 | 3;
 
 /**
  * GradCAM keys are deterministic per (run, stage, model) so re-uploads
@@ -184,6 +185,25 @@ export async function uploadPredictionImageBuffer(params: {
       Body: params.body,
       ContentType: params.contentType,
       ContentLength: params.body.byteLength,
+    }),
+  );
+}
+
+export async function copyPredictionImage(params: {
+  sourceKey: string;
+  destKey: string;
+}): Promise<void> {
+  const client = getR2Client();
+  const bucket = R2_BUCKET as string;
+  const encodedSource = `${bucket}/${params.sourceKey
+    .split("/")
+    .map((s) => encodeURIComponent(s))
+    .join("/")}`;
+  await client.send(
+    new CopyObjectCommand({
+      Bucket: bucket,
+      CopySource: encodedSource,
+      Key: params.destKey,
     }),
   );
 }

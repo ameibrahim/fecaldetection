@@ -22,13 +22,13 @@ import { motion, useReducedMotion } from "framer-motion";
 import { Eye, ImageOff, Lightbulb, Maximize2, X } from "lucide-react";
 import { useEffect, useId, useMemo, useState } from "react";
 
-type TabId = "s1-gradcam" | "s1-lime" | "s2-gradcam" | "s2-lime";
+type TabId = "s1-gradcam" | "s1-lime" | "s2-gradcam" | "s2-lime" | "s3-lime";
 
 type TabDef = {
   id: TabId;
   label: string;
   short: string;
-  stage: 1 | 2;
+  stage: 1 | 2 | 3;
   kind: "gradcam" | "lime";
 };
 
@@ -37,16 +37,19 @@ const TABS: TabDef[] = [
   { id: "s1-lime", label: "Stage 1 · LIME", short: "S1 LIME", stage: 1, kind: "lime" },
   { id: "s2-gradcam", label: "Stage 2 · GradCAM", short: "S2 GradCAM", stage: 2, kind: "gradcam" },
   { id: "s2-lime", label: "Stage 2 · LIME", short: "S2 LIME", stage: 2, kind: "lime" },
+  { id: "s3-lime", label: "Stage 3 · LIME", short: "S3 LIME", stage: 3, kind: "lime" },
 ];
 
 export type ExplanationsTabsProps = {
   runId: string;
   stage1Status: StageRunStatus;
   stage2Status: StageRunStatus;
+  stage3Status: StageRunStatus;
   stage1Gradcam: GradcamArtifactEntry[];
   stage1Lime: LimeArtifactEntry[];
   stage2Gradcam: GradcamArtifactEntry[];
   stage2Lime: LimeArtifactEntry[];
+  stage3Lime: LimeArtifactEntry[];
 };
 
 function shortModelName(filename: string): string {
@@ -69,14 +72,22 @@ function formatRelativeTime(iso: string): string {
 }
 
 function emptyStateMessage(
-  stage: 1 | 2,
+  stage: 1 | 2 | 3,
   kind: "gradcam" | "lime",
   stage1Status: StageRunStatus,
   stage2Status: StageRunStatus,
+  stage3Status: StageRunStatus,
 ): string {
-  const stageStatus = stage === 1 ? stage1Status : stage2Status;
+  const stageStatus =
+    stage === 1 ? stage1Status : stage === 2 ? stage2Status : stage3Status;
   if (stage === 2 && stage1Status === "finished" && stage2Status === "skipped") {
     return "Stage 2 was skipped (Stage 1 returned non-fecal), so no Stage 2 explanations exist.";
+  }
+  if (stage === 3 && stage1Status === "finished" && stage2Status === "skipped") {
+    return "Stage 3 was skipped (Stage 1 returned non-fecal).";
+  }
+  if (stage === 3 && stage2Status === "finished" && stage3Status === "skipped") {
+    return "Stage 3 was skipped (no helminth detected at Stage 2).";
   }
   if (stageStatus === "skipped") {
     return `Stage ${stage} was skipped for this run.`;
@@ -94,10 +105,12 @@ export function ExplanationsTabs({
   runId,
   stage1Status,
   stage2Status,
+  stage3Status,
   stage1Gradcam,
   stage1Lime,
   stage2Gradcam,
   stage2Lime,
+  stage3Lime,
 }: ExplanationsTabsProps) {
   const reduceMotion = useReducedMotion();
   const indicatorId = useId();
@@ -113,12 +126,23 @@ export function ExplanationsTabs({
       "s1-lime": stage1Lime.length,
       "s2-gradcam": stage2Gradcam.length,
       "s2-lime": stage2Lime.length,
+      "s3-lime": stage3Lime.length,
     }),
-    [stage1Gradcam.length, stage1Lime.length, stage2Gradcam.length, stage2Lime.length],
+    [
+      stage1Gradcam.length,
+      stage1Lime.length,
+      stage2Gradcam.length,
+      stage2Lime.length,
+      stage3Lime.length,
+    ],
   );
 
   const totalCount =
-    counts["s1-gradcam"] + counts["s1-lime"] + counts["s2-gradcam"] + counts["s2-lime"];
+    counts["s1-gradcam"] +
+    counts["s1-lime"] +
+    counts["s2-gradcam"] +
+    counts["s2-lime"] +
+    counts["s3-lime"];
 
   useEffect(() => {
     if (!lightbox) return;
@@ -142,7 +166,11 @@ export function ExplanationsTabs({
 
   const activeTab = TABS.find((t) => t.id === active) ?? TABS[0]!;
   const modelList =
-    activeTab.stage === 1 ? STAGE1_MODEL_FILENAMES : STAGE2_MODEL_FILENAMES;
+    activeTab.stage === 1
+      ? STAGE1_MODEL_FILENAMES
+      : activeTab.stage === 2
+        ? STAGE2_MODEL_FILENAMES
+        : [];
 
   // Group entries by model — useful so all LIME runs for a given model cluster.
   const grouped = (() => {
@@ -153,7 +181,9 @@ export function ExplanationsTabs({
           ? stage1Lime
           : activeTab.id === "s2-gradcam"
             ? stage2Gradcam
-            : stage2Lime;
+            : activeTab.id === "s2-lime"
+              ? stage2Lime
+              : stage3Lime;
     const map = new Map<string, Array<GradcamArtifactEntry | LimeArtifactEntry>>();
     for (const entry of list) {
       const existing = map.get(entry.modelFilename) ?? [];
@@ -257,6 +287,7 @@ export function ExplanationsTabs({
                   activeTab.kind,
                   stage1Status,
                   stage2Status,
+                  stage3Status,
                 )}
               </p>
             </CardContent>

@@ -74,7 +74,7 @@ export default function LearnPage() {
             </p>
           </ScrollFadeIn>
           <div className="mt-3">
-            <PretextPageHeadline text="How Fecal Classification works" />
+            <PretextPageHeadline text="How Helminth Detection works" />
           </div>
           <ScrollFadeIn className="mt-6" delay={0.2}>
             <WordHoverBlock
