@@ -21,7 +21,14 @@ export async function GET(request: Request, context: RouteParams) {
     const { id: runId } = await context.params;
     const url = new URL(request.url);
     const stageParam = url.searchParams.get("stage");
-    const stage = stageParam === "1" ? 1 : stageParam === "2" ? 2 : null;
+    const stage =
+      stageParam === "1"
+        ? 1
+        : stageParam === "2"
+          ? 2
+          : stageParam === "3"
+            ? 3
+            : null;
     const kind = url.searchParams.get("kind");
     const modelFilename = url.searchParams.get("modelFilename");
     const objectKeyOverride = url.searchParams.get("objectKey");
@@ -44,7 +51,11 @@ export async function GET(request: Request, context: RouteParams) {
           ? run.stage1_lime_artifacts
           : stage === 2 && kind === "gradcam"
             ? run.stage2_gradcam_artifacts
-            : run.stage2_lime_artifacts;
+            : stage === 2 && kind === "lime"
+              ? run.stage2_lime_artifacts
+              : stage === 3 && kind === "lime"
+                ? run.stage3_lime_artifacts
+                : [];
 
     // If an `objectKey` is supplied, prefer that exact entry (LIME has multiple
     // entries per model — UI must specify which). Otherwise pick the most
@@ -71,7 +82,7 @@ export async function GET(request: Request, context: RouteParams) {
 
     const headers = new Headers();
     headers.set("Content-Type", object.contentType || "image/png");
-    headers.set("Cache-Control", "private, no-store");
+    headers.set("Cache-Control", "public, max-age=31536000, immutable");
     headers.set("X-Content-Type-Options", "nosniff");
     if (object.etag) headers.set("ETag", object.etag);
     if (typeof object.contentLength === "number") {

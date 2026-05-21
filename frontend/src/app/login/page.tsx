@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic";
 export const metadata: Metadata = {
   title: "Sign in",
   description:
-    "Sign in to Fecal Classification to access your clinician dashboard.",
+    "Sign in to Helminth Detection to access your clinician dashboard.",
 };
 
 export default async function LoginPage({

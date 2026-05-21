@@ -33,7 +33,7 @@ export async function GET(request: Request, context: RouteParams) {
 
     const headers = new Headers();
     headers.set("Content-Type", "image/png");
-    headers.set("Cache-Control", "private, no-store");
+    headers.set("Cache-Control", "public, max-age=31536000, immutable");
     headers.set("X-Content-Type-Options", "nosniff");
     if (object.etag) headers.set("ETag", object.etag);
     if (typeof object.contentLength === "number") {

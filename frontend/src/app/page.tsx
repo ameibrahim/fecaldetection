@@ -89,7 +89,7 @@ export default function Home() {
           <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
             <ScrollFadeIn>
               <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
-                Why Fecal Classification
+                Why Helminth Detection
               </p>
               <h2
                 id="about-heading"

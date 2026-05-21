@@ -23,13 +23,13 @@ export const viewport: Viewport = {
 
 export const metadata: Metadata = {
   title: {
-    default: "Fecal Classification: Clinical microscopy assistant",
-    template: "%s · Fecal Classification",
+    default: "Helminth Detection: Clinical microscopy assistant",
+    template: "%s · Helminth Detection",
   },
   description:
     "Upload microscopic slides, run staged fecal detection, binary classification, and multi class overlays, built for clinical workflows.",
   openGraph: {
-    title: "Fecal Classification",
+    title: "Helminth Detection",
     description:
       "AI assisted microscopy: fecal screening, binary review, and localized multi class findings for licensed clinicians.",
   },

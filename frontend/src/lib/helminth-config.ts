@@ -4,28 +4,61 @@
  */
 export const STAGE1_MODEL_FILENAMES = [
   "BINARY_ConvNeXtBase_Round1.keras",
-  "BINARY_DenseNet169_Round1.keras",
-  "BINARY_EfficientNetB0_Round1.keras",
-  "BINARY_MobileNetV2_Round5.keras",
+  "BINARY_DenseNet169_Round4.keras",
+  "BINARY_EfficientNetB0_Round4.keras",
+  "BINARY_MobileNetV2_Round4.keras",
   "BINARY_NASNetMobile_Round1.keras",
   "BINARY_ResNet50_Round2.keras",
-  "BINARY_VGG19_Round4.keras",
+  "BINARY_VGG19_Round2.keras",
 ] as const;
 
 export const STAGE2_MODEL_FILENAMES = [
-  "HELMINTHS_BINARY_DenseNet169_Round1.keras",
-  "HELMINTHS_BINARY_ConvNeXtBase_Round2.keras",
-  "HELMINTHS_BINARY_EfficientNetB0_Round1.keras",
+  "HELMINTHS_BINARY_ConvNeXtBase_Round1.keras",
+  "HELMINTHS_BINARY_DenseNet169_Round2.keras",
+  "HELMINTHS_BINARY_EfficientNetB0_Round3.keras",
   "HELMINTHS_BINARY_MobileNetV2_Round5.keras",
-  "HELMINTHS_BINARY_NASNetMobile_Round4.keras",
-  "HELMINTHS_BINARY_ResNet50_Round1.keras",
-  "HELMINTHS_BINARY_VGG19_Round2.keras",
+  "HELMINTHS_BINARY_NASNetMobile_Round3.keras",
+  "HELMINTHS_BINARY_ResNet50_Round2.keras",
+  "HELMINTHS_BINARY_VGG19_Round4.keras",
 ] as const;
 
 /** Stage 3 multiclass detection (Ultralytics .pt on dedicated API). */
 export const STAGE3_MODEL_FILENAMES = [
-  "multiclass_helminths_rtdetr_l_round_1_best.pt",
+  "multiclass_helminths_yolo11_l_round_2_best.pt",
+  "multiclass_helminths_rtdetr_l_round_5_best.pt",
 ] as const;
+
+export type Stage3ModelOption = {
+  id: string;
+  label: string;
+  filename: (typeof STAGE3_MODEL_FILENAMES)[number];
+};
+
+/** User-facing labels for the Stage 3 detector picker. */
+export const STAGE3_MODEL_OPTIONS: readonly Stage3ModelOption[] = [
+  {
+    id: "yolo",
+    label: "YOLOv11-L (Round 2)",
+    filename: "multiclass_helminths_yolo11_l_round_2_best.pt",
+  },
+  {
+    id: "rtdetr",
+    label: "RT-DETR-L (Round 5)",
+    filename: "multiclass_helminths_rtdetr_l_round_5_best.pt",
+  },
+] as const;
+
+export const DEFAULT_STAGE3_MODEL_FILENAME =
+  "multiclass_helminths_yolo11_l_round_2_best.pt" as const;
+
+export function getStage3ModelLabel(filename: string | null | undefined): string {
+  if (!filename) return "Unknown";
+  const opt = STAGE3_MODEL_OPTIONS.find((o) => o.filename === filename);
+  if (opt) return opt.label;
+  if (filename.toLowerCase().includes("yolo")) return "YOLO";
+  if (filename.toLowerCase().includes("rtdetr")) return "RT-DETR";
+  return filename.replace(/\.pt$/i, "");
+}
 
 export const HELMINTH_MODEL_INPUT_SIZE = 224;
 export const STAGE1_MODEL_INPUT_SIZE = 224;
@@ -114,4 +147,10 @@ export function getStage3WsOriginForClient(): string {
   return trimTrailingSlash(
     process.env.NEXT_PUBLIC_STAGE3_WS_ORIGIN ?? "wss://stage3api.helminthdetect.app",
   );
+}
+
+/** Browser: LIME explanation stream for Stage 3 batch job. */
+export function getStage3LimeWsUrl(jobId: string): string {
+  const origin = getStage3WsOriginForClient();
+  return `${origin}/ws/lime/${encodeURIComponent(jobId)}`;
 }

@@ -26,10 +26,10 @@ export function PredictionDisclaimer() {
     <Wrapper {...wrapperMotion}>
       <div
         role="note"
-        className="flex items-start gap-2.5 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3.5 py-2.5 text-sm leading-snug text-amber-900 shadow-sm dark:border-amber-400/35 dark:bg-amber-400/10 dark:text-amber-100"
+        className="flex items-start gap-2.5 rounded-xl border border-primary/25 bg-primary/5 px-3.5 py-2.5 text-sm leading-snug text-foreground shadow-sm"
       >
         <Info
-          className="mt-0.5 size-4 shrink-0 text-amber-700 dark:text-amber-300"
+          className="mt-0.5 size-4 shrink-0 text-primary"
           aria-hidden
         />
         <p>

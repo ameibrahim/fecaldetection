@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   title: "Reset password",
-  description: "Choose a new password for your Fecal Classification account.",
+  description: "Choose a new password for your Helminth Detection account.",
 };
 
 function ResetPasswordFallback() {

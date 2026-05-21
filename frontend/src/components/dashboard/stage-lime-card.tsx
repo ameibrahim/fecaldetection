@@ -34,6 +34,9 @@ export type StageLimeCardProps = {
   history: LimeRunEntry[];
   onRun: (modelFilename: string, numSamples: number) => void;
   disabledReason?: string;
+  /** When set, hide the model picker and always run LIME on this file. */
+  fixedModelFilename?: string;
+  fixedModelLabel?: string;
 };
 
 const MIN_SAMPLES = 10;
@@ -65,6 +68,8 @@ export function StageLimeCard({
   history,
   onRun,
   disabledReason,
+  fixedModelFilename,
+  fixedModelLabel,
 }: StageLimeCardProps) {
   const [model, setModel] = useState<string>(modelFilenames[0] ?? "");
   const [samples, setSamples] = useState<number>(DEFAULT_SAMPLES);
@@ -72,11 +77,9 @@ export function StageLimeCard({
     null,
   );
 
-  // If the parent ever swaps the available model list (e.g. after reset), the
-  // currently-selected value may no longer exist. Derive the effective value
-  // during render — no extra effect needed.
-  const effectiveModel =
-    model && modelFilenames.includes(model)
+  const effectiveModel = fixedModelFilename
+    ? fixedModelFilename
+    : model && modelFilenames.includes(model)
       ? model
       : (modelFilenames[0] ?? "");
 
@@ -112,21 +115,30 @@ export function StageLimeCard({
         <CardContent className="space-y-4">
           <div className="rounded-xl border border-border/60 bg-muted/15 p-3.5">
             <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
-              <label className="flex min-w-0 flex-col gap-1 text-xs text-muted-foreground">
-                <span>{stageLabel} model</span>
-                <select
-                  className={selectClass}
-                  value={effectiveModel}
-                  onChange={(e) => setModel(e.target.value)}
-                  disabled={disabled || busy}
-                >
-                  {modelFilenames.map((m) => (
-                    <option key={m} value={m}>
-                      {shortName(m)}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              {fixedModelFilename ? (
+                <div className="flex min-w-0 flex-col gap-1 text-xs text-muted-foreground">
+                  <span>Detector for this run</span>
+                  <span className="inline-flex w-fit rounded-full border border-border/60 bg-muted/30 px-2.5 py-1 font-medium text-foreground">
+                    {fixedModelLabel ?? shortName(fixedModelFilename)}
+                  </span>
+                </div>
+              ) : (
+                <label className="flex min-w-0 flex-col gap-1 text-xs text-muted-foreground">
+                  <span>{stageLabel} model</span>
+                  <select
+                    className={selectClass}
+                    value={effectiveModel}
+                    onChange={(e) => setModel(e.target.value)}
+                    disabled={disabled || busy}
+                  >
+                    {modelFilenames.map((m) => (
+                      <option key={m} value={m}>
+                        {shortName(m)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
               <div className="flex min-w-0 flex-1 flex-col gap-1 text-xs text-muted-foreground sm:min-w-[16rem]">
                 <div className="flex items-baseline justify-between gap-2">
                   <span>Number of samples</span>

@@ -13,14 +13,18 @@ import {
 } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import {
+  DEFAULT_STAGE3_MODEL_FILENAME,
   STAGE1_MODEL_FILENAMES,
   STAGE2_MODEL_FILENAMES,
+  STAGE3_MODEL_FILENAMES,
   getStage1GradcamWsUrl,
   getStage1LimeWsUrl,
   getStage1WsOriginForClient,
   getStage2GradcamWsUrl,
   getStage2LimeWsUrl,
   getStage2WsOriginForClient,
+  getStage3LimeWsUrl,
+  getStage3ModelLabel,
   getStage3WsOriginForClient,
 } from "@/lib/helminth-config";
 import { extractGradcamPayload, extractLimePayload } from "@/lib/explanation-ws";
@@ -36,7 +40,13 @@ import {
   PipelineOutcomeBanner,
   type PipelineOutcome,
 } from "@/components/dashboard/pipeline-outcome-banner";
-import { PredictionDisclaimer } from "@/components/dashboard/prediction-disclaimer";
+import { Stage3ModelSelect } from "@/components/dashboard/stage3-model-select";
+import {
+  ForceFreshPredictionToggle,
+  GenerateExplanationsCard,
+  PipelineCacheHitBanner,
+} from "@/components/dashboard/pipeline-cache-ui";
+import { computeImageHashSha256 } from "@/lib/image-hash";
 import { DetectionImagePreview } from "@/components/dashboard/detection-image-preview";
 import { getDetectionPaletteEntryForClass } from "@/lib/detection-palette";
 import { buildDetectionOverlayItemsFromResults } from "@/lib/stage3-detection-overlay";
@@ -67,7 +77,19 @@ type PipelineStatusPayload = {
 
 type PipelineSubmitResponse = {
   id: string;
-  stage: {
+  cached?: boolean;
+  cacheSourceCreatedAt?: string | null;
+  finalOutcome?: string | null;
+  stage1Status?: StepStatus | "finished" | "skipped" | "failed" | "pending" | "processing";
+  stage2Status?: StepStatus | "finished" | "skipped" | "failed" | "pending" | "processing";
+  stage3Status?: StepStatus | "finished" | "skipped" | "failed" | "pending" | "processing";
+  stage1VoteSummary?: StageVoteSummary | null;
+  stage2VoteSummary?: StageVoteSummary | null;
+  stage1ResultPayload?: { results?: unknown[] } | null;
+  stage2ResultPayload?: { results?: unknown[] } | null;
+  stage3ResultPayload?: { results?: unknown[] } | null;
+  hasStage3AnnotatedImage?: boolean;
+  stage?: {
     stage: StageNumber;
     externalJobId: string;
     totalModels: number;
@@ -191,6 +213,15 @@ function countPredictionsBeforeRow(results: unknown[], rowIndex: number): number
   return n;
 }
 
+function mapDbStageStatus(
+  status: PipelineSubmitResponse["stage1Status"],
+): StepStatus {
+  if (status === "finished") return "complete";
+  if (status === "skipped") return "skipped";
+  if (status === "processing") return "active";
+  return "idle";
+}
+
 function buildVoteSummaryFromResults(results: unknown[]): StageVoteSummary {
   let positiveVotes = 0;
   let negativeVotes = 0;
@@ -248,8 +279,21 @@ export function HelminthPredictPanel({
   const [stage2JobId, setStage2JobId] = useState<string | null>(null);
   const [limeHistory, setLimeHistory] = useState<LimeRunEntry[]>([]);
   const [limeBusy, setLimeBusy] = useState(false);
+  const [isCachedRun, setIsCachedRun] = useState(false);
+  const [cacheSourceCreatedAt, setCacheSourceCreatedAt] = useState<string | null>(
+    null,
+  );
+  const [explanationsStarted, setExplanationsStarted] = useState(false);
+  const [explanationsStarting, setExplanationsStarting] = useState(false);
+  const [forceRerun, setForceRerun] = useState(false);
   const [stage2LimeHistory, setStage2LimeHistory] = useState<LimeRunEntry[]>([]);
   const [stage2LimeBusy, setStage2LimeBusy] = useState(false);
+  const [stage3ModelFilename, setStage3ModelFilename] = useState<string>(
+    DEFAULT_STAGE3_MODEL_FILENAME,
+  );
+  const [stage3JobId, setStage3JobId] = useState<string | null>(null);
+  const [stage3LimeHistory, setStage3LimeHistory] = useState<LimeRunEntry[]>([]);
+  const [stage3LimeBusy, setStage3LimeBusy] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const gradcamWsRef = useRef<WebSocket | null>(null);
@@ -271,9 +315,15 @@ export function HelminthPredictPanel({
   const stage2LimeWsRef = useRef<WebSocket | null>(null);
   const stage2LimePingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const stage2LimeEntryIdRef = useRef<string | null>(null);
+  const stage3LimeWsRef = useRef<WebSocket | null>(null);
+  const stage3LimePingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const stage3LimeEntryIdRef = useRef<string | null>(null);
   // Dedup keys for stream-per-model GradCAM uploads, scoped to the current run.
   const stage1GradcamUploadedRef = useRef<Set<string>>(new Set());
   const stage2GradcamUploadedRef = useRef<Set<string>>(new Set());
+  const idempotencyKeyRef = useRef<string>(
+    typeof crypto !== "undefined" ? crypto.randomUUID() : "local-idem",
+  );
 
   useEffect(() => {
     if (!file) {
@@ -387,13 +437,24 @@ export function HelminthPredictPanel({
     }
   }, []);
 
+  const teardownStage3LimeWs = useCallback(() => {
+    if (stage3LimePingRef.current) {
+      clearInterval(stage3LimePingRef.current);
+      stage3LimePingRef.current = null;
+    }
+    if (stage3LimeWsRef.current) {
+      stage3LimeWsRef.current.close();
+      stage3LimeWsRef.current = null;
+    }
+  }, []);
+
   /**
    * Fire-and-forget POST of one PNG explanation to the run's R2 prefix.
    * Failures only warn — they never block the live UI.
    */
   const uploadExplanationPng = useCallback(
     async (params: {
-      stage: 1 | 2;
+      stage: 1 | 2 | 3;
       kind: "gradcam" | "lime";
       modelFilename: string;
       dataUrl: string;
@@ -872,6 +933,8 @@ export function HelminthPredictPanel({
         } else if (stage === 2) {
           setStage2JobId(externalJobId);
           connectStage2Gradcam(externalJobId);
+        } else if (stage === 3) {
+          setStage3JobId(externalJobId);
         }
       };
       ws.onmessage = (evt) => {
@@ -993,6 +1056,7 @@ export function HelminthPredictPanel({
 
       const fd = new FormData();
       fd.set("image", originalFile);
+      fd.set("modelFilename", stage3ModelFilename);
       const res = await fetch(
         `/api/predictions/pipeline-run/${encodeURIComponent(runId)}/stage3`,
         {
@@ -1017,7 +1081,7 @@ export function HelminthPredictPanel({
       setLiveMessage("Stage 3 started. Opening live connection…");
       connectWebSocket(data.stage.externalJobId, runId, 3);
     },
-    [connectWebSocket, delegateAuthHeaders],
+    [connectWebSocket, delegateAuthHeaders, stage3ModelFilename],
   );
 
   const handleStatusResult = useCallback(
@@ -1138,14 +1202,24 @@ export function HelminthPredictPanel({
       teardownLimeWs();
       teardownStage2GradcamWs();
       teardownStage2LimeWs();
+      teardownStage3LimeWs();
       stage2StartedRef.current = false;
       stage3StartedRef.current = false;
       runIdRef.current = null;
       currentStageRef.current = null;
       limeEntryIdRef.current = null;
       stage2LimeEntryIdRef.current = null;
+      stage3LimeEntryIdRef.current = null;
       setStage1JobId(null);
       setStage2JobId(null);
+      setStage3JobId(null);
+      setStage3ModelFilename(DEFAULT_STAGE3_MODEL_FILENAME);
+      setIsCachedRun(false);
+      setCacheSourceCreatedAt(null);
+      setExplanationsStarted(false);
+      setExplanationsStarting(false);
+      setForceRerun(false);
+      idempotencyKeyRef.current = crypto.randomUUID();
       if (!opts?.keepFile) {
         fileRef.current = null;
         setFile(null);
@@ -1156,6 +1230,8 @@ export function HelminthPredictPanel({
       setLimeBusy(false);
       setStage2LimeHistory([]);
       setStage2LimeBusy(false);
+      setStage3LimeHistory([]);
+      setStage3LimeBusy(false);
       setError(null);
       setPreview(null);
       setActivity([]);
@@ -1179,6 +1255,7 @@ export function HelminthPredictPanel({
       teardownLimeWs,
       teardownStage2GradcamWs,
       teardownStage2LimeWs,
+      teardownStage3LimeWs,
       teardownWs,
     ],
   );
@@ -1546,25 +1623,328 @@ export function HelminthPredictPanel({
     [stage2JobId, stage2LimeBusy, teardownStage2LimeWs, uploadExplanationPng],
   );
 
-  const onSubmit = async () => {
+  const runStage3Lime = useCallback(
+    (modelFilename: string, numSamples: number) => {
+      const jobId = stage3JobId;
+      if (!jobId) {
+        toast.error("LIME unavailable", {
+          description: "Run a Stage 3 prediction first.",
+        });
+        return;
+      }
+      if (stage3LimeBusy) return;
+
+      const clamped = Math.max(10, Math.min(1000, Math.round(numSamples)));
+      const entryId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      stage3LimeEntryIdRef.current = entryId;
+      teardownStage3LimeWs();
+
+      const entry: LimeRunEntry = {
+        id: entryId,
+        modelFilename,
+        numSamples: clamped,
+        status: "streaming",
+        startedAt: Date.now(),
+        progressPct: null,
+      };
+      setStage3LimeHistory((prev) => [entry, ...prev]);
+      setStage3LimeBusy(true);
+
+      let ws: WebSocket;
+      try {
+        ws = new WebSocket(getStage3LimeWsUrl(jobId));
+      } catch {
+        setStage3LimeHistory((prev) =>
+          prev.map((e) =>
+            e.id === entryId
+              ? { ...e, status: "error", error: "Could not open LIME connection." }
+              : e,
+          ),
+        );
+        setStage3LimeBusy(false);
+        return;
+      }
+      stage3LimeWsRef.current = ws;
+
+      ws.onopen = () => {
+        try {
+          ws.send(
+            JSON.stringify({
+              modelFilename,
+              numSamples: clamped,
+            }),
+          );
+        } catch {
+          /* WS closed before send */
+        }
+        stage3LimePingRef.current = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) ws.send("ping");
+        }, 15000);
+      };
+
+      ws.onmessage = (evt) => {
+        try {
+          const raw = JSON.parse(String(evt.data)) as unknown;
+          const parsed = extractLimePayload(raw, STAGE3_MODEL_FILENAMES);
+
+          if (parsed.imageSrc) {
+            void uploadExplanationPng({
+              stage: 3,
+              kind: "lime",
+              modelFilename,
+              dataUrl: parsed.imageSrc,
+              numSamples: clamped,
+            });
+            setStage3LimeHistory((prev) =>
+              prev.map((e) =>
+                e.id === entryId
+                  ? {
+                      ...e,
+                      status: "ok",
+                      imageSrc: parsed.imageSrc!,
+                      progressPct: 100,
+                    }
+                  : e,
+              ),
+            );
+            setStage3LimeBusy(false);
+            stage3LimeEntryIdRef.current = null;
+            queueMicrotask(() => teardownStage3LimeWs());
+            return;
+          }
+
+          if (parsed.errorText) {
+            setStage3LimeHistory((prev) =>
+              prev.map((e) =>
+                e.id === entryId
+                  ? { ...e, status: "error", error: parsed.errorText! }
+                  : e,
+              ),
+            );
+            setStage3LimeBusy(false);
+            stage3LimeEntryIdRef.current = null;
+            queueMicrotask(() => teardownStage3LimeWs());
+            return;
+          }
+
+          if (parsed.progressPct !== null) {
+            setStage3LimeHistory((prev) =>
+              prev.map((e) =>
+                e.id === entryId
+                  ? { ...e, progressPct: parsed.progressPct }
+                  : e,
+              ),
+            );
+          }
+
+          if (parsed.isFinished) {
+            setStage3LimeHistory((prev) =>
+              prev.map((e) =>
+                e.id === entryId && e.status === "streaming"
+                  ? {
+                      ...e,
+                      status: "error",
+                      error: "No LIME output received.",
+                    }
+                  : e,
+              ),
+            );
+            setStage3LimeBusy(false);
+            stage3LimeEntryIdRef.current = null;
+            queueMicrotask(() => teardownStage3LimeWs());
+          }
+        } catch {
+          /* ignore malformed frames */
+        }
+      };
+
+      ws.onerror = () => {
+        setStage3LimeHistory((prev) =>
+          prev.map((e) =>
+            e.id === entryId && e.status === "streaming"
+              ? {
+                  ...e,
+                  status: "error",
+                  error:
+                    "LIME connection failed. The Stage 3 job may have expired; re-run a prediction.",
+                }
+              : e,
+          ),
+        );
+        setStage3LimeBusy(false);
+        stage3LimeEntryIdRef.current = null;
+        teardownStage3LimeWs();
+      };
+
+      ws.onclose = () => {
+        if (stage3LimePingRef.current) {
+          clearInterval(stage3LimePingRef.current);
+          stage3LimePingRef.current = null;
+        }
+        stage3LimeWsRef.current = null;
+        if (stage3LimeEntryIdRef.current === entryId) {
+          setStage3LimeHistory((prev) =>
+            prev.map((e) =>
+              e.id === entryId && e.status === "streaming"
+                ? {
+                    ...e,
+                    status: "error",
+                    error:
+                      "LIME connection closed before any output. The Stage 3 job may have expired; re-run a prediction.",
+                  }
+                : e,
+            ),
+          );
+          setStage3LimeBusy(false);
+          stage3LimeEntryIdRef.current = null;
+        }
+      };
+    },
+    [
+      stage3JobId,
+      stage3LimeBusy,
+      teardownStage3LimeWs,
+      uploadExplanationPng,
+    ],
+  );
+
+  const applyCachedResponse = useCallback(
+    (data: PipelineSubmitResponse) => {
+      runIdRef.current = data.id;
+      setIsCachedRun(true);
+      setCacheSourceCreatedAt(data.cacheSourceCreatedAt ?? null);
+      setExplanationsStarted(false);
+
+      if (data.stage1Status) setStage1Status(mapDbStageStatus(data.stage1Status));
+      if (data.stage2Status) setStage2Status(mapDbStageStatus(data.stage2Status));
+      if (data.stage3Status) setStage3Status(mapDbStageStatus(data.stage3Status));
+
+      if (data.stage1VoteSummary) setStage1Vote(data.stage1VoteSummary);
+      if (data.stage2VoteSummary) setStage2Vote(data.stage2VoteSummary);
+
+      const results =
+        (data.stage3ResultPayload &&
+          typeof data.stage3ResultPayload === "object" &&
+          Array.isArray(
+            (data.stage3ResultPayload as { results?: unknown[] }).results,
+          ) &&
+          (data.stage3ResultPayload as { results: unknown[] }).results) ||
+        (data.stage2ResultPayload &&
+          typeof data.stage2ResultPayload === "object" &&
+          Array.isArray(
+            (data.stage2ResultPayload as { results?: unknown[] }).results,
+          ) &&
+          (data.stage2ResultPayload as { results: unknown[] }).results) ||
+        (data.stage1ResultPayload &&
+          typeof data.stage1ResultPayload === "object" &&
+          Array.isArray(
+            (data.stage1ResultPayload as { results?: unknown[] }).results,
+          ) &&
+          (data.stage1ResultPayload as { results: unknown[] }).results) ||
+        [];
+
+      setPreview({ results, errors: [] });
+      setProgress({ done: 0, total: 0 });
+      void finishPipeline("Loaded cached prediction results.");
+      window.dispatchEvent(new Event("pipeline-run-saved"));
+    },
+    [finishPipeline],
+  );
+
+  const startExplanations = useCallback(async () => {
+    const runId = runIdRef.current;
+    if (!runId || explanationsStarting) return;
+    setExplanationsStarting(true);
+    try {
+      const res = await fetch(
+        `/api/predictions/pipeline-run/${encodeURIComponent(runId)}/start-explanations`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: delegateAuthHeaders,
+        },
+      );
+      const data = (await res.json()) as {
+        ok?: boolean;
+        error?: string;
+        stage1?: { externalJobId: string };
+        stage2?: { externalJobId: string };
+      };
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || "Could not start explanations.");
+      }
+      setExplanationsStarted(true);
+      if (data.stage1?.externalJobId) {
+        setStage1JobId(data.stage1.externalJobId);
+        connectStage1Gradcam(data.stage1.externalJobId);
+      }
+      if (data.stage2?.externalJobId) {
+        setStage2JobId(data.stage2.externalJobId);
+        connectStage2Gradcam(data.stage2.externalJobId);
+      }
+    } catch (reason) {
+      const message =
+        reason instanceof Error ? reason.message : "Could not start explanations.";
+      toast.error("Explanations unavailable", { description: message });
+    } finally {
+      setExplanationsStarting(false);
+    }
+  }, [
+    connectStage1Gradcam,
+    connectStage2Gradcam,
+    delegateAuthHeaders,
+    explanationsStarting,
+  ]);
+
+  const onSubmit = async (opts?: { force?: boolean }) => {
     if (!file) return;
+    const useForce = opts?.force ?? forceRerun;
     resetPanelState({ keepFile: true });
     fileRef.current = file;
+    if (useForce) setForceRerun(true);
     setStage1Status("active");
-    setLiveMessage("Uploading image and starting Stage 1…");
+    setLiveMessage(
+      useForce
+        ? "Force re-running full pipeline…"
+        : "Uploading image and starting Stage 1…",
+    );
 
     const fd = new FormData();
     fd.set("image", file);
+    try {
+      const imageHash = await computeImageHashSha256(file);
+      fd.set("imageHash", imageHash);
+      if (useForce) fd.set("forceRerun", "true");
+    } catch {
+      /* hash optional — server still runs without cache */
+    }
+
+    const submitHeaders: Record<string, string> = {
+      ...(delegateAuthHeaders ?? {}),
+      "Idempotency-Key": idempotencyKeyRef.current,
+    };
 
     try {
       const res = await fetch("/api/predictions/pipeline-run", {
         method: "POST",
         body: fd,
         credentials: "include",
-        headers: delegateAuthHeaders,
+        headers: submitHeaders,
       });
-      const data = (await res.json()) as PipelineSubmitResponse & { error?: string };
-      if (!res.ok || !data.id || !data.stage?.externalJobId) {
+      const data = (await res.json()) as PipelineSubmitResponse & {
+        error?: string;
+        ok?: boolean;
+      };
+      if (!res.ok || !data.id) {
+        throw new Error(data.error || "Upload failed.");
+      }
+
+      if (data.cached) {
+        applyCachedResponse(data);
+        return;
+      }
+
+      if (!data.stage?.externalJobId) {
         throw new Error(data.error || "Upload failed.");
       }
 
@@ -1709,6 +2089,16 @@ export function HelminthPredictPanel({
             ({(file.size / 1024).toFixed(0)} KB)
           </p>
         )}
+        <ForceFreshPredictionToggle
+          checked={forceRerun}
+          onChange={setForceRerun}
+          disabled={isRunning}
+        />
+        <Stage3ModelSelect
+          value={stage3ModelFilename}
+          onChange={setStage3ModelFilename}
+          disabled={isRunning}
+        />
         <Button
           type="button"
           className="h-10"
@@ -1742,8 +2132,6 @@ export function HelminthPredictPanel({
         )}
       </div>
 
-      {(isRunning || pipelineOutcome !== null) && <PredictionDisclaimer />}
-
       <div className="space-y-6">
           {pipelineOutcome && (
             <PipelineOutcomeBanner
@@ -1751,6 +2139,16 @@ export function HelminthPredictPanel({
               onReset={() => resetPanelState({ scroll: true })}
             />
           )}
+
+          {isCachedRun ? (
+            <PipelineCacheHitBanner
+              cacheSourceCreatedAt={cacheSourceCreatedAt}
+              onRunAgain={() => {
+                idempotencyKeyRef.current = crypto.randomUUID();
+                void onSubmit({ force: true });
+              }}
+            />
+          ) : null}
 
           {(stage1Vote ||
             stage2Vote ||
@@ -1798,60 +2196,94 @@ export function HelminthPredictPanel({
             </div>
           )}
 
-          <StageGradcamGrid
-            stageLabel="Stage 1"
-            modelFilenames={STAGE1_MODEL_FILENAMES}
-            shortName={shortModelName}
-            phase={gradcamPanel.phase}
-            connectionError={gradcamPanel.connectionError}
-            byModel={gradcamPanel.byModel}
-          />
-
-          {(stage1JobId || limeHistory.length > 0) && (
-            <StageLimeCard
-              stageLabel="Stage 1"
-              modelFilenames={STAGE1_MODEL_FILENAMES}
-              shortName={shortModelName}
-              disabled={!stage1JobId || stage1Status === "active"}
-              disabledReason={
-                stage1Status === "active"
-                  ? "LIME is available after Stage 1 finishes."
-                  : !stage1JobId
-                    ? "Run a prediction first to enable LIME."
-                    : undefined
-              }
-              busy={limeBusy}
-              history={limeHistory}
-              onRun={runLime}
+          {isCachedRun && !explanationsStarted ? (
+            <GenerateExplanationsCard
+              busy={explanationsStarting}
+              onStart={() => void startExplanations()}
             />
-          )}
+          ) : (
+            <>
+              <StageGradcamGrid
+                stageLabel="Stage 1"
+                modelFilenames={STAGE1_MODEL_FILENAMES}
+                shortName={shortModelName}
+                phase={gradcamPanel.phase}
+                connectionError={gradcamPanel.connectionError}
+                byModel={gradcamPanel.byModel}
+              />
 
-          <StageGradcamGrid
-            stageLabel="Stage 2"
-            modelFilenames={STAGE2_MODEL_FILENAMES}
-            shortName={shortModelName}
-            phase={stage2GradcamPanel.phase}
-            connectionError={stage2GradcamPanel.connectionError}
-            byModel={stage2GradcamPanel.byModel}
-          />
+              {(stage1JobId || limeHistory.length > 0) && (
+                <StageLimeCard
+                  stageLabel="Stage 1"
+                  modelFilenames={STAGE1_MODEL_FILENAMES}
+                  shortName={shortModelName}
+                  disabled={!stage1JobId || stage1Status === "active"}
+                  disabledReason={
+                    stage1Status === "active"
+                      ? "LIME is available after Stage 1 finishes."
+                      : !stage1JobId
+                        ? isCachedRun
+                          ? "Generate explanations first to enable LIME."
+                          : "Run a prediction first to enable LIME."
+                        : undefined
+                  }
+                  busy={limeBusy}
+                  history={limeHistory}
+                  onRun={runLime}
+                />
+              )}
 
-          {(stage2JobId || stage2LimeHistory.length > 0) && (
-            <StageLimeCard
-              stageLabel="Stage 2"
-              modelFilenames={STAGE2_MODEL_FILENAMES}
-              shortName={shortModelName}
-              disabled={!stage2JobId || stage2Status === "active"}
-              disabledReason={
-                stage2Status === "active"
-                  ? "LIME is available after Stage 2 finishes."
-                  : !stage2JobId
-                    ? "Stage 2 LIME unlocks after Stage 2 starts."
-                    : undefined
-              }
-              busy={stage2LimeBusy}
-              history={stage2LimeHistory}
-              onRun={runStage2Lime}
-            />
+              <StageGradcamGrid
+                stageLabel="Stage 2"
+                modelFilenames={STAGE2_MODEL_FILENAMES}
+                shortName={shortModelName}
+                phase={stage2GradcamPanel.phase}
+                connectionError={stage2GradcamPanel.connectionError}
+                byModel={stage2GradcamPanel.byModel}
+              />
+
+              {(stage2JobId || stage2LimeHistory.length > 0) && (
+                <StageLimeCard
+                  stageLabel="Stage 2"
+                  modelFilenames={STAGE2_MODEL_FILENAMES}
+                  shortName={shortModelName}
+                  disabled={!stage2JobId || stage2Status === "active"}
+                  disabledReason={
+                    stage2Status === "active"
+                      ? "LIME is available after Stage 2 finishes."
+                      : !stage2JobId
+                        ? isCachedRun
+                          ? "Generate explanations first to enable Stage 2 LIME."
+                          : "Stage 2 LIME unlocks after Stage 2 starts."
+                        : undefined
+                  }
+                  busy={stage2LimeBusy}
+                  history={stage2LimeHistory}
+                  onRun={runStage2Lime}
+                />
+              )}
+
+              {(stage3JobId || stage3LimeHistory.length > 0) && (
+                <StageLimeCard
+                  stageLabel="Stage 3"
+                  modelFilenames={STAGE3_MODEL_FILENAMES}
+                  shortName={shortModelName}
+                  disabled={!stage3JobId || stage3Status === "active"}
+                  disabledReason={
+                    stage3Status === "active"
+                      ? "LIME is available after Stage 3 finishes."
+                      : !stage3JobId
+                        ? "Stage 3 LIME unlocks after species detection starts."
+                        : undefined
+                  }
+                  busy={stage3LimeBusy}
+                  history={stage3LimeHistory}
+                  onRun={runStage3Lime}
+                  fixedModelFilename={stage3ModelFilename}
+                  fixedModelLabel={getStage3ModelLabel(stage3ModelFilename)}
+                />
+              )}
+            </>
           )}
 
           {activity.length > 0 && (

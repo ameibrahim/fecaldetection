@@ -4,6 +4,7 @@ import { RunDetailImage } from "@/components/dashboard/run-detail-image";
 import { buttonVariants } from "@/components/ui/button-variants";
 import { getCachedDashboardSession } from "@/lib/auth/dashboard-session";
 import { getDetectionPaletteEntryForClass } from "@/lib/detection-palette";
+import { getStage3ModelLabel } from "@/lib/helminth-config";
 import { getPipelineRunForUser } from "@/lib/pipeline-db";
 import { shortModelName, summarizePipelineRun } from "@/lib/pipeline-summary";
 import { createPredictionApiDelegateToken } from "@/lib/prediction-api-token";
@@ -100,9 +101,14 @@ export default async function DashboardHistoryRunPage({
         )
       : [];
 
+  const stage3DetectorLabel = run.stage3_model_filename
+    ? getStage3ModelLabel(run.stage3_model_filename)
+    : null;
   const stage3Status =
     run.stage3_status === "finished"
-      ? `${overlayItems.length} detection(s)`
+      ? `${overlayItems.length} detection(s)${
+          stage3DetectorLabel ? ` · ${stage3DetectorLabel}` : ""
+        }`
       : run.stage3_status;
 
   const stageSummaries: Array<{ label: string; text: string }> = [
@@ -179,10 +185,12 @@ export default async function DashboardHistoryRunPage({
           runId={run.id}
           stage1Status={run.stage1_status}
           stage2Status={run.stage2_status}
+          stage3Status={run.stage3_status}
           stage1Gradcam={run.stage1_gradcam_artifacts}
           stage1Lime={run.stage1_lime_artifacts}
           stage2Gradcam={run.stage2_gradcam_artifacts}
           stage2Lime={run.stage2_lime_artifacts}
+          stage3Lime={run.stage3_lime_artifacts}
         />
 
         {run.stage3_annotated_image_object_key ? (
