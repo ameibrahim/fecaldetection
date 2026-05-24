@@ -56,12 +56,22 @@ export async function POST(request: Request) {
         ? rawHash
         : undefined;
     const forceRerun = formData.get("forceRerun") === "true";
+    const skipStage1 = formData.get("skipStage1") === "true";
+    const skipStage2 = formData.get("skipStage2") === "true";
+    const rawStage3Model = formData.get("stage3ModelFilename");
+    const stage3ModelFilename =
+      typeof rawStage3Model === "string" && rawStage3Model.trim()
+        ? rawStage3Model.trim()
+        : undefined;
     const idempotencyKey = request.headers.get("Idempotency-Key")?.trim() || undefined;
 
     const result = await serviceSubmitPipelineRun(userId, image, {
       imageHash,
       forceRerun,
       idempotencyKey,
+      skipStage1,
+      skipStage2,
+      stage3ModelFilename,
     });
     if (!result.ok) {
       return NextResponse.json(

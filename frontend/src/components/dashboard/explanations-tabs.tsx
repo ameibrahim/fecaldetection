@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils";
 import {
   STAGE1_MODEL_FILENAMES,
   STAGE2_MODEL_FILENAMES,
+  STAGE3_LIME_UI_ENABLED,
 } from "@/lib/helminth-config";
 import type {
   GradcamArtifactEntry,
@@ -32,13 +33,17 @@ type TabDef = {
   kind: "gradcam" | "lime";
 };
 
-const TABS: TabDef[] = [
+const ALL_TABS: TabDef[] = [
   { id: "s1-gradcam", label: "Stage 1 · GradCAM", short: "S1 GradCAM", stage: 1, kind: "gradcam" },
   { id: "s1-lime", label: "Stage 1 · LIME", short: "S1 LIME", stage: 1, kind: "lime" },
   { id: "s2-gradcam", label: "Stage 2 · GradCAM", short: "S2 GradCAM", stage: 2, kind: "gradcam" },
   { id: "s2-lime", label: "Stage 2 · LIME", short: "S2 LIME", stage: 2, kind: "lime" },
   { id: "s3-lime", label: "Stage 3 · LIME", short: "S3 LIME", stage: 3, kind: "lime" },
 ];
+
+const TABS = STAGE3_LIME_UI_ENABLED
+  ? ALL_TABS
+  : ALL_TABS.filter((t) => t.id !== "s3-lime");
 
 export type ExplanationsTabsProps = {
   runId: string;
@@ -126,7 +131,7 @@ export function ExplanationsTabs({
       "s1-lime": stage1Lime.length,
       "s2-gradcam": stage2Gradcam.length,
       "s2-lime": stage2Lime.length,
-      "s3-lime": stage3Lime.length,
+      "s3-lime": STAGE3_LIME_UI_ENABLED ? stage3Lime.length : 0,
     }),
     [
       stage1Gradcam.length,
@@ -137,12 +142,7 @@ export function ExplanationsTabs({
     ],
   );
 
-  const totalCount =
-    counts["s1-gradcam"] +
-    counts["s1-lime"] +
-    counts["s2-gradcam"] +
-    counts["s2-lime"] +
-    counts["s3-lime"];
+  const totalCount = TABS.reduce((sum, t) => sum + counts[t.id], 0);
 
   useEffect(() => {
     if (!lightbox) return;
@@ -164,7 +164,9 @@ export function ExplanationsTabs({
     return null;
   }
 
-  const activeTab = TABS.find((t) => t.id === active) ?? TABS[0]!;
+  const activeTab =
+    TABS.find((t) => t.id === active) ?? TABS[0]!;
+  const effectiveActive = activeTab.id;
   const modelList =
     activeTab.stage === 1
       ? STAGE1_MODEL_FILENAMES
@@ -223,7 +225,7 @@ export function ExplanationsTabs({
         className="mt-3 flex w-full flex-wrap items-center gap-1 rounded-xl border border-border/70 bg-card p-1 shadow-sm"
       >
         {TABS.map((t) => {
-          const isActive = active === t.id;
+          const isActive = effectiveActive === t.id;
           const count = counts[t.id];
           return (
             <button
@@ -273,11 +275,11 @@ export function ExplanationsTabs({
 
       <div
         role="tabpanel"
-        id={`explanations-panel-${active}`}
-        aria-labelledby={`explanations-tab-${active}`}
+        id={`explanations-panel-${effectiveActive}`}
+        aria-labelledby={`explanations-tab-${effectiveActive}`}
         className="mt-4"
       >
-        {counts[active] === 0 ? (
+        {counts[effectiveActive] === 0 ? (
           <Card className="border-dashed border-border/70 bg-muted/10">
             <CardContent className="flex flex-col items-center gap-2 px-4 py-8 text-center">
               <ImageOff className="size-8 text-muted-foreground/60" aria-hidden />

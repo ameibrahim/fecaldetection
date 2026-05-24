@@ -149,6 +149,9 @@ export function getStage3WsOriginForClient(): string {
   );
 }
 
+/** When false, Stage 3 LIME controls and history tabs are hidden (Stages 1–2 unchanged). */
+export const STAGE3_LIME_UI_ENABLED = false;
+
 /** Browser: LIME explanation stream for Stage 3 batch job. */
 export function getStage3LimeWsUrl(jobId: string): string {
   const origin = getStage3WsOriginForClient();

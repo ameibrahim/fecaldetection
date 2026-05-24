@@ -1,6 +1,4 @@
 import {
-  HELMINTH_MODEL_FILENAMES,
-  HELMINTH_MODEL_INPUT_SIZE,
   STAGE1_MODEL_FILENAMES,
   STAGE1_MODEL_INPUT_SIZE,
   STAGE2_MODEL_FILENAMES,
@@ -39,6 +37,7 @@ import {
   type PipelineRunStatus,
   type PredictionCacheSignatureRow,
   type PredictionPipelineRunRow,
+  type StageRunStatus,
   type VoteSummary,
 } from "@/lib/pipeline-db";
 import {
@@ -109,6 +108,9 @@ export type PipelineSubmitOptions = {
   imageHash?: string;
   forceRerun?: boolean;
   idempotencyKey?: string;
+  skipStage1?: boolean;
+  skipStage2?: boolean;
+  stage3ModelFilename?: string;
 };
 
 export type PipelineStage2StartOk = {
@@ -270,6 +272,10 @@ function activeStage(run: PredictionPipelineRunRow): StageNumber | null {
   return null;
 }
 
+function isUserSkippedStage2(run: PredictionPipelineRunRow): boolean {
+  return run.stage2_status === "skipped" && run.stage3_status === "pending";
+}
+
 function shouldAwaitStage2Start(run: PredictionPipelineRunRow): boolean {
   return (
     run.status === "processing" &&
@@ -287,11 +293,18 @@ function isStage2HelminthPositive(run: PredictionPipelineRunRow): boolean {
 }
 
 function shouldAwaitStage3Start(run: PredictionPipelineRunRow): boolean {
-  return (
-    run.status === "processing" &&
+  if (run.status !== "processing" || run.stage3_status !== "pending") {
+    return false;
+  }
+  if (
     run.stage2_status === "finished" &&
-    run.stage3_status === "pending" &&
     isStage2HelminthPositive(run)
+  ) {
+    return true;
+  }
+  return (
+    isUserSkippedStage2(run) &&
+    (run.stage1_status === "finished" || run.stage1_status === "skipped")
   );
 }
 
@@ -579,16 +592,27 @@ async function saveFinishedStage1(params: {
   runStatus: PipelineRunStatus;
   gateDecision: "fecal" | "non_fecal";
   awaitingStage2Start: boolean;
+  awaitingStage3Start?: boolean;
 }> {
   const voteSummary = buildVoteSummary(params.remote, STAGE1_MODEL_FILENAMES);
   const isFecal = voteSummary.majorityClass === 0;
+  const userSkippedStage2 = isUserSkippedStage2(params.run);
   await saveStage1Result({
     runId: params.run.id,
     userId: params.userId,
     payload: params.remote,
     voteSummary,
     isFecal,
+    userSkippedStage2,
   });
+  if (userSkippedStage2) {
+    return {
+      runStatus: "processing",
+      gateDecision: isFecal ? "fecal" : "non_fecal",
+      awaitingStage2Start: false,
+      awaitingStage3Start: true,
+    };
+  }
   if (!isFecal) {
     const updated = await getPipelineRunForUser(params.run.id, params.userId);
     if (updated) await writeCacheIfEligible(updated);
@@ -678,11 +702,87 @@ async function saveFinishedStage3(params: {
   return { runStatus: "finished" };
 }
 
+function resolvePipelineStartStage(
+  skipStage1: boolean,
+  skipStage2: boolean,
+): StageNumber {
+  if (skipStage1 && skipStage2) return 3;
+  if (skipStage1) return 2;
+  return 1;
+}
+
+function initialPipelineStageStatuses(
+  startStage: StageNumber,
+  skipStage2: boolean,
+): {
+  stage1Status: StageRunStatus;
+  stage2Status: StageRunStatus;
+  stage3Status: StageRunStatus;
+} {
+  if (startStage === 3) {
+    return {
+      stage1Status: "skipped",
+      stage2Status: "skipped",
+      stage3Status: "processing",
+    };
+  }
+  if (startStage === 2) {
+    return {
+      stage1Status: "skipped",
+      stage2Status: "processing",
+      stage3Status: "pending",
+    };
+  }
+  return {
+    stage1Status: "processing",
+    stage2Status: skipStage2 ? "skipped" : "pending",
+    stage3Status: "pending",
+  };
+}
+
+function stageBatchConfig(
+  stage: StageNumber,
+  stage3ModelFilename?: string,
+): {
+  modelFilenames: readonly string[];
+  modelInputFeatureSize: number;
+  apiBaseUrl: string;
+} {
+  if (stage === 1) {
+    return {
+      modelFilenames: STAGE1_MODEL_FILENAMES,
+      modelInputFeatureSize: STAGE1_MODEL_INPUT_SIZE,
+      apiBaseUrl: getStage1ApiBaseUrl(),
+    };
+  }
+  if (stage === 2) {
+    return {
+      modelFilenames: STAGE2_MODEL_FILENAMES,
+      modelInputFeatureSize: STAGE2_MODEL_INPUT_SIZE,
+      apiBaseUrl: getStage2ApiBaseUrl(),
+    };
+  }
+  const modelFilename = stage3ModelFilename ?? STAGE3_MODEL_FILENAMES[0];
+  if (!(STAGE3_MODEL_FILENAMES as readonly string[]).includes(modelFilename)) {
+    throw new Error("Unknown Stage 3 model.");
+  }
+  return {
+    modelFilenames: [modelFilename],
+    modelInputFeatureSize: STAGE3_MODEL_INPUT_SIZE,
+    apiBaseUrl: getStage3ApiBaseUrl(),
+  };
+}
+
 async function startRun(
   userId: string,
   file: File,
   mode: StartMode,
   imageHash?: string | null,
+  pipelineOptions?: {
+    skipStage1?: boolean;
+    skipStage2?: boolean;
+    stage3ModelFilename?: string;
+  },
 ): Promise<PipelineSubmitOk | PipelineErr> {
   const validationErr = fileValidationError(file);
   if (validationErr) {
@@ -696,17 +796,32 @@ async function startRun(
   }
 
   const runId = crypto.randomUUID();
-  const stage: StageNumber = mode === "pipeline" ? 1 : 2;
+  const skipStage1 = Boolean(pipelineOptions?.skipStage1);
+  const skipStage2 = Boolean(pipelineOptions?.skipStage2);
+  const stage: StageNumber =
+    mode === "pipeline"
+      ? resolvePipelineStartStage(skipStage1, skipStage2)
+      : 2;
+  let batchConfig: ReturnType<typeof stageBatchConfig>;
+  try {
+    batchConfig = stageBatchConfig(stage, pipelineOptions?.stage3ModelFilename);
+  } catch (reason) {
+    return { ok: false, error: runError(reason) };
+  }
+  const { modelFilenames, modelInputFeatureSize, apiBaseUrl } = batchConfig;
   const imageObjectKey = buildPredictionImageObjectKey({
     userId,
     runId,
     mimeType: file.type || "application/octet-stream",
   });
-  const modelFilenames =
-    stage === 1 ? STAGE1_MODEL_FILENAMES : HELMINTH_MODEL_FILENAMES;
-  const modelInputFeatureSize =
-    stage === 1 ? STAGE1_MODEL_INPUT_SIZE : HELMINTH_MODEL_INPUT_SIZE;
-  const apiBaseUrl = stage === 1 ? getStage1ApiBaseUrl() : getStage2ApiBaseUrl();
+  const initialStatuses =
+    mode === "pipeline"
+      ? initialPipelineStageStatuses(stage, skipStage2)
+      : {
+          stage1Status: "skipped" as const,
+          stage2Status: "processing" as const,
+          stage3Status: "skipped" as const,
+        };
 
   try {
     await insertPipelineRun({
@@ -715,9 +830,9 @@ async function startRun(
       originalFilename: file.name || null,
       imageObjectKey: null,
       imageHash: imageHash ?? null,
-      stage1Status: stage === 1 ? "processing" : "skipped",
-      stage2Status: stage === 1 ? "pending" : "processing",
-      stage3Status: stage === 1 ? "pending" : "skipped",
+      stage1Status: initialStatuses.stage1Status,
+      stage2Status: initialStatuses.stage2Status,
+      stage3Status: initialStatuses.stage3Status,
     });
   } catch (reason) {
     return { ok: false, error: dbErrorMessage(reason) };
@@ -776,11 +891,18 @@ async function startRun(
         userId,
         externalJobId: batch.externalJobId,
       });
-    } else {
+    } else if (stage === 2) {
       await updateStage2ExternalJobId({
         runId,
         userId,
         externalJobId: batch.externalJobId,
+      });
+    } else {
+      await updateStage3ExternalJobId({
+        runId,
+        userId,
+        externalJobId: batch.externalJobId,
+        modelFilename: modelFilenames[0] ?? null,
       });
     }
   } catch (reason) {
@@ -856,6 +978,11 @@ export async function serviceSubmitPipelineRun(
     file,
     "pipeline",
     imageHash && isValidImageHashHex(imageHash) ? imageHash : null,
+    {
+      skipStage1: options?.skipStage1,
+      skipStage2: options?.skipStage2,
+      stage3ModelFilename: options?.stage3ModelFilename,
+    },
   );
   if (result.ok && options?.idempotencyKey) {
     await insertIdempotencyKey({
@@ -913,10 +1040,10 @@ export async function serviceStartPipelineStage2(
     return { ok: false, error: "Stage 2 was skipped for this run." };
   }
 
-  if (run.stage1_status !== "finished") {
+  if (run.stage1_status !== "finished" && run.stage1_status !== "skipped") {
     return { ok: false, error: "Stage 1 is not complete yet." };
   }
-  if (!isStage1Positive(run)) {
+  if (run.stage1_status === "finished" && !isStage1Positive(run)) {
     return {
       ok: false,
       error: "Stage 2 cannot start because Stage 1 is non fecal.",
@@ -1014,9 +1141,13 @@ export async function serviceStartPipelineStage3(
   }
 
   if (run.stage2_status !== "finished") {
-    return { ok: false, error: "Stage 2 is not complete yet." };
-  }
-  if (!isStage2HelminthPositive(run)) {
+    if (!isUserSkippedStage2(run)) {
+      return { ok: false, error: "Stage 2 is not complete yet." };
+    }
+    if (run.stage1_status !== "finished" && run.stage1_status !== "skipped") {
+      return { ok: false, error: "Stage 1 is not complete yet." };
+    }
+  } else if (!isStage2HelminthPositive(run)) {
     return {
       ok: false,
       error: "Stage 3 cannot start because Stage 2 did not detect helminth.",
@@ -1169,6 +1300,7 @@ export async function serviceFinalizePipelineRun(
         remote: remoteObj,
         gateDecision: stage1.gateDecision,
         awaitingStage2Start: stage1.awaitingStage2Start,
+        awaitingStage3Start: stage1.awaitingStage3Start,
       };
     }
 
@@ -1308,6 +1440,7 @@ export async function serviceSyncPipelineRun(
         remote: remoteObj,
         gateDecision: stage1.gateDecision,
         awaitingStage2Start: stage1.awaitingStage2Start,
+        awaitingStage3Start: stage1.awaitingStage3Start,
       };
     }
 

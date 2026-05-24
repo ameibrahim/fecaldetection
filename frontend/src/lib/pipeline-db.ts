@@ -231,10 +231,27 @@ export async function saveStage1Result(params: {
   payload: unknown;
   voteSummary: VoteSummary;
   isFecal: boolean;
+  /** User chose to skip Stage 2 — always advance to Stage 3 after Stage 1. */
+  userSkippedStage2?: boolean;
 }): Promise<void> {
   const sql = getSql();
   const payloadJson = JSON.stringify(params.payload);
   const voteSummaryJson = JSON.stringify(params.voteSummary);
+  if (params.userSkippedStage2) {
+    await sql`
+      UPDATE prediction_pipeline_runs
+      SET status = 'processing',
+          stage1_status = 'finished',
+          stage1_result_payload = ${payloadJson}::jsonb,
+          stage1_vote_summary = ${voteSummaryJson}::jsonb,
+          stage2_status = 'skipped',
+          stage3_status = 'pending',
+          error_message = NULL,
+          updated_at = now()
+      WHERE id = ${params.runId}::uuid AND user_id = ${params.userId}
+    `;
+    return;
+  }
   if (params.isFecal) {
     await sql`
       UPDATE prediction_pipeline_runs
