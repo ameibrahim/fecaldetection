@@ -52,6 +52,7 @@ import { computeImageHashSha256 } from "@/lib/image-hash";
 import { DetectionImagePreview } from "@/components/dashboard/detection-image-preview";
 import { getDetectionPaletteEntryForClass } from "@/lib/detection-palette";
 import { buildDetectionOverlayItemsFromResults } from "@/lib/stage3-detection-overlay";
+import { resolvePipelineTerminalOutcome } from "@/lib/pipeline-terminal-outcome";
 import type { DetectionBoxItem } from "@/components/dashboard/detection-image-preview";
 import {
   AlertCircle,
@@ -75,6 +76,12 @@ type PipelineStatusPayload = {
   awaitingStage2Start?: boolean;
   awaitingStage3Start?: boolean;
   idempotent?: boolean;
+  finalOutcome?: string | null;
+  stage1Status?: PipelineSubmitResponse["stage1Status"];
+  stage2Status?: PipelineSubmitResponse["stage2Status"];
+  stage3Status?: PipelineSubmitResponse["stage3Status"];
+  skipStage1Requested?: boolean;
+  skipStage2Requested?: boolean;
 };
 
 type PipelineSubmitResponse = {
@@ -327,6 +334,7 @@ export function HelminthPredictPanel({
   const stage2GradcamUploadedRef = useRef<Set<string>>(new Set());
   const userSkipStage1Ref = useRef(false);
   const userSkipStage2Ref = useRef(false);
+  const pipelineTerminalRef = useRef(false);
   const idempotencyKeyRef = useRef<string>(
     typeof crypto !== "undefined" ? crypto.randomUUID() : "local-idem",
   );
@@ -805,12 +813,70 @@ export function HelminthPredictPanel({
         setStage3Status("complete");
       }
       setProgress((prev) => ({ ...prev, done: prev.total }));
+    },
+    [stage2Status, stage3Status],
+  );
+
+  const commitTerminalOutcome = useCallback(
+    (overrides?: {
+      finalOutcome?: string | null;
+      stage1Status?: StepStatus | PipelineSubmitResponse["stage1Status"];
+      stage2Status?: StepStatus | PipelineSubmitResponse["stage2Status"];
+      stage3Status?: StepStatus | PipelineSubmitResponse["stage3Status"];
+      stage1Vote?: StageVoteSummary | null;
+      stage2Vote?: StageVoteSummary | null;
+      detectionCount?: number;
+      skipStage1Requested?: boolean;
+      skipStage2Requested?: boolean;
+    }) => {
+      const outcome = resolvePipelineTerminalOutcome({
+        finalOutcome: overrides?.finalOutcome,
+        stage1Status: overrides?.stage1Status ?? stage1Status,
+        stage2Status: overrides?.stage2Status ?? stage2Status,
+        stage3Status: overrides?.stage3Status ?? stage3Status,
+        stage1Vote: overrides?.stage1Vote ?? stage1Vote,
+        stage2Vote: overrides?.stage2Vote ?? stage2Vote,
+        detectionCount:
+          overrides?.detectionCount ??
+          buildDetectionOverlayItemsFromResults(preview?.results).length,
+        skipStage1Requested:
+          overrides?.skipStage1Requested ?? userSkipStage1Ref.current,
+        skipStage2Requested:
+          overrides?.skipStage2Requested ?? userSkipStage2Ref.current,
+      });
+      if (!outcome) return false;
+      if (pipelineTerminalRef.current) return true;
+      pipelineTerminalRef.current = true;
+      setPipelineOutcome(outcome);
       window.dispatchEvent(new Event("pipeline-run-saved"));
       toast.success("Run saved", {
         description: "Prediction history and stats were updated.",
       });
+      return true;
     },
-    [stage2Status, stage3Status],
+    [
+      stage1Status,
+      stage2Status,
+      stage3Status,
+      stage1Vote,
+      stage2Vote,
+      preview?.results,
+    ],
+  );
+
+  const syncStageStatusesFromResult = useCallback(
+    (result: PipelineStatusPayload) => {
+      if (result.stage1Status) {
+        setStage1Status(mapDbStageStatus(result.stage1Status));
+      }
+      if (result.stage2Status) {
+        setStage2Status(mapDbStageStatus(result.stage2Status));
+      }
+      if (result.stage3Status) {
+        setStage3Status(mapDbStageStatus(result.stage3Status));
+      }
+    },
+    [],
   );
 
   const applyWsPayload = useCallback((msg: WsPayload, stage: StageNumber) => {
@@ -1092,6 +1158,10 @@ export function HelminthPredictPanel({
 
   const handleStatusResult = useCallback(
     async (runId: string, result: PipelineStatusPayload) => {
+      if (pipelineTerminalRef.current) {
+        return;
+      }
+
       if (result.stage && result.remote) {
         applyWsPayload(result.remote as unknown as WsPayload, result.stage);
       }
@@ -1099,16 +1169,29 @@ export function HelminthPredictPanel({
       if (result.stage === 1 && result.persisted) {
         setStage1Status("complete");
       }
-      if (result.gateDecision === "non_fecal" && !userSkipStage2Ref.current) {
+
+      const skip1 = result.skipStage1Requested ?? userSkipStage1Ref.current;
+      const skip2 = result.skipStage2Requested ?? userSkipStage2Ref.current;
+
+      if (result.gateDecision === "non_fecal" && !skip2) {
         setStage2Status("skipped");
         setStage3Status("skipped");
-        await finishPipeline(
+        finishPipeline(
           "Stage 1 majority vote is non fecal. Stage 2 skipped and run saved.",
         );
+        commitTerminalOutcome({
+          finalOutcome: "non_fecal",
+          stage1Status: "finished",
+          stage2Status: "skipped",
+          stage3Status: "skipped",
+          skipStage1Requested: skip1,
+          skipStage2Requested: skip2,
+        });
         return;
       }
+
       if (result.awaitingStage3Start) {
-        if (userSkipStage2Ref.current || result.stage === 1) {
+        if (skip2 || result.stage === 1) {
           setStage2Status("skipped");
         } else {
           setStage2Status("complete");
@@ -1116,68 +1199,105 @@ export function HelminthPredictPanel({
         await startStage3(runId);
         return;
       }
+
       if (result.awaitingStage2Start) {
         setStage2Status("idle");
         await startStage2(runId);
         return;
       }
+
       if (result.runStatus === "finished") {
-        if (result.stage === 3) {
+        if (result.stage === 3 || result.stage3Status === "finished") {
           setStage3Status("complete");
-          await finishPipeline("Pipeline complete. Species detection saved.");
+          finishPipeline("Pipeline complete. Species detection saved.");
+          commitTerminalOutcome({
+            finalOutcome: result.finalOutcome ?? "helminth_positive",
+            stage3Status: "finished",
+            skipStage1Requested: skip1,
+            skipStage2Requested: skip2,
+          });
           return;
         }
-        if (result.stage === 2 || result.stage === null) {
+
+        if (
+          result.finalOutcome === "helminth_negative" ||
+          (result.stage2Status === "finished" &&
+            result.stage3Status === "skipped")
+        ) {
           setStage2Status("complete");
           setStage3Status("skipped");
-          await finishPipeline("Pipeline complete. Results saved.");
+          finishPipeline(
+            "Stage 2 complete. No helminth detected — run saved.",
+          );
+          commitTerminalOutcome({
+            finalOutcome: "helminth_negative",
+            stage2Status: "finished",
+            stage3Status: "skipped",
+            skipStage1Requested: skip1,
+            skipStage2Requested: skip2,
+          });
           return;
+        }
+
+        if (
+          result.finalOutcome === "non_fecal" ||
+          (result.stage1Status === "finished" &&
+            result.stage2Status === "skipped" &&
+            result.stage3Status === "skipped")
+        ) {
+          setStage1Status("complete");
+          setStage2Status("skipped");
+          setStage3Status("skipped");
+          finishPipeline(
+            "Stage 1 majority vote is non fecal. Stage 2 skipped and run saved.",
+          );
+          commitTerminalOutcome({
+            finalOutcome: "non_fecal",
+            stage1Status: "finished",
+            stage2Status: "skipped",
+            stage3Status: "skipped",
+            skipStage1Requested: skip1,
+            skipStage2Requested: skip2,
+          });
+          return;
+        }
+
+        if (result.idempotent && result.stage === null) {
+          syncStageStatusesFromResult(result);
+          commitTerminalOutcome({
+            finalOutcome: result.finalOutcome,
+            stage1Status: result.stage1Status,
+            stage2Status: result.stage2Status,
+            stage3Status: result.stage3Status,
+            skipStage1Requested: skip1,
+            skipStage2Requested: skip2,
+          });
+          return;
+        }
+
+        if (result.stage === 2) {
+          setStage2Status("complete");
+          setStage3Status("skipped");
+          finishPipeline("Pipeline complete. Results saved.");
+          commitTerminalOutcome({
+            finalOutcome: result.finalOutcome ?? "helminth_negative",
+            stage2Status: "finished",
+            stage3Status: "skipped",
+            skipStage1Requested: skip1,
+            skipStage2Requested: skip2,
+          });
         }
       }
     },
-    [applyWsPayload, finishPipeline, startStage2, startStage3],
+    [
+      applyWsPayload,
+      commitTerminalOutcome,
+      finishPipeline,
+      startStage2,
+      startStage3,
+      syncStageStatusesFromResult,
+    ],
   );
-
-  // Derive `pipelineOutcome` from terminal stage statuses + vote summaries.
-  // Failures are set explicitly in catch blocks via `setPipelineOutcome`.
-  useEffect(() => {
-    if (
-      stage3Status === "complete" &&
-      pipelineOutcome?.kind !== "stage3_complete"
-    ) {
-      const detectionCount = buildDetectionOverlayItemsFromResults(
-        preview?.results,
-      ).length;
-      setPipelineOutcome({ kind: "stage3_complete", detectionCount });
-      return;
-    }
-    if (
-      stage2Status === "complete" &&
-      stage3Status === "skipped" &&
-      stage2Vote &&
-      pipelineOutcome?.kind !== "stage2_no_helminth"
-    ) {
-      setPipelineOutcome({ kind: "stage2_no_helminth", vote: stage2Vote });
-      return;
-    }
-    if (
-      stage1Status === "complete" &&
-      stage2Status === "skipped" &&
-      stage1Vote &&
-      pipelineOutcome?.kind !== "stage1_non_fecal"
-    ) {
-      setPipelineOutcome({ kind: "stage1_non_fecal", vote: stage1Vote });
-      return;
-    }
-  }, [
-    stage1Status,
-    stage2Status,
-    stage3Status,
-    stage1Vote,
-    stage2Vote,
-    preview?.results,
-    pipelineOutcome?.kind,
-  ]);
 
   useEffect(() => {
     handleStatusResultRef.current = handleStatusResult;
@@ -1261,6 +1381,7 @@ export function HelminthPredictPanel({
       setProgress({ done: 0, total: 0 });
       setLiveMessage("");
       setPipelineOutcome(null);
+      pipelineTerminalRef.current = false;
       if (opts?.scroll && typeof document !== "undefined") {
         const target = document.getElementById("dashboard-predict-card");
         if (target) {
@@ -1863,10 +1984,15 @@ export function HelminthPredictPanel({
 
       setPreview({ results, errors: [] });
       setProgress({ done: 0, total: 0 });
-      void finishPipeline("Loaded cached prediction results.");
-      window.dispatchEvent(new Event("pipeline-run-saved"));
+      finishPipeline("Loaded cached prediction results.");
+      commitTerminalOutcome({
+        finalOutcome: data.finalOutcome,
+        stage1Status: data.stage1Status,
+        stage2Status: data.stage2Status,
+        stage3Status: data.stage3Status,
+      });
     },
-    [finishPipeline],
+    [commitTerminalOutcome, finishPipeline],
   );
 
   const startExplanations = useCallback(async () => {

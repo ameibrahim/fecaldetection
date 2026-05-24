@@ -64,6 +64,8 @@ export type PredictionPipelineRunRow = {
   image_hash: string | null;
   cache_hit: boolean;
   cache_source_run_id: string | null;
+  skip_stage1_requested: boolean;
+  skip_stage2_requested: boolean;
 };
 
 export type PredictionCacheSignatureRow = {
@@ -110,6 +112,8 @@ export async function insertPipelineRun(params: {
   stage1Status?: StageRunStatus;
   stage2Status?: StageRunStatus;
   stage3Status?: StageRunStatus;
+  skipStage1Requested?: boolean;
+  skipStage2Requested?: boolean;
 }): Promise<void> {
   const sql = getSql();
   const stage1Status = params.stage1Status ?? "processing";
@@ -118,7 +122,8 @@ export async function insertPipelineRun(params: {
   await sql`
     INSERT INTO prediction_pipeline_runs (
       id, user_id, status, original_filename, image_object_key, image_hash,
-      stage1_status, stage2_status, stage3_status
+      stage1_status, stage2_status, stage3_status,
+      skip_stage1_requested, skip_stage2_requested
     ) VALUES (
       ${params.runId}::uuid,
       ${params.userId},
@@ -128,7 +133,9 @@ export async function insertPipelineRun(params: {
       ${params.imageHash ?? null},
       ${stage1Status},
       ${stage2Status},
-      ${stage3Status}
+      ${stage3Status},
+      ${params.skipStage1Requested ?? false},
+      ${params.skipStage2Requested ?? false}
     )
   `;
 }
@@ -337,6 +344,7 @@ export async function saveStage3Result(params: {
         stage3_status = 'finished',
         stage3_result_payload = ${payloadJson}::jsonb,
         stage3_annotated_image_object_key = ${annotatedKey},
+        final_outcome = COALESCE(final_outcome, 'helminth_positive'),
         error_message = NULL,
         updated_at = now()
     WHERE id = ${params.runId}::uuid AND user_id = ${params.userId}
@@ -390,7 +398,9 @@ export async function getPipelineRunForUser(
            final_outcome, error_message,
            image_hash,
            COALESCE(cache_hit, false) AS cache_hit,
-           cache_source_run_id
+           cache_source_run_id,
+           COALESCE(skip_stage1_requested, false) AS skip_stage1_requested,
+           COALESCE(skip_stage2_requested, false) AS skip_stage2_requested
     FROM prediction_pipeline_runs
     WHERE id = ${runId}::uuid AND user_id = ${userId}
     LIMIT 1
@@ -420,7 +430,9 @@ export async function getPipelineRunById(
            final_outcome, error_message,
            image_hash,
            COALESCE(cache_hit, false) AS cache_hit,
-           cache_source_run_id
+           cache_source_run_id,
+           COALESCE(skip_stage1_requested, false) AS skip_stage1_requested,
+           COALESCE(skip_stage2_requested, false) AS skip_stage2_requested
     FROM prediction_pipeline_runs
     WHERE id = ${runId}::uuid
     LIMIT 1
@@ -451,7 +463,9 @@ export async function listPipelineHistory(
            final_outcome, error_message,
            image_hash,
            COALESCE(cache_hit, false) AS cache_hit,
-           cache_source_run_id
+           cache_source_run_id,
+           COALESCE(skip_stage1_requested, false) AS skip_stage1_requested,
+           COALESCE(skip_stage2_requested, false) AS skip_stage2_requested
     FROM prediction_pipeline_runs
     WHERE user_id = ${userId}
     ORDER BY created_at DESC
@@ -666,7 +680,8 @@ export async function insertCachedPipelineRun(params: {
       stage1_result_payload, stage1_vote_summary,
       stage2_result_payload, stage2_vote_summary,
       stage3_result_payload, stage3_annotated_image_object_key,
-      final_outcome
+      final_outcome,
+      skip_stage1_requested, skip_stage2_requested
     ) VALUES (
       ${params.runId}::uuid,
       ${params.userId},
@@ -685,7 +700,9 @@ export async function insertCachedPipelineRun(params: {
       ${s2v}::jsonb,
       ${s3}::jsonb,
       ${params.stage3AnnotatedImageObjectKey ?? null},
-      ${params.signature.final_outcome}
+      ${params.signature.final_outcome},
+      false,
+      false
     )
   `;
 }
