@@ -143,6 +143,12 @@ export type PipelineFinalizeOk = {
   awaitingStage2Start?: boolean;
   awaitingStage3Start?: boolean;
   idempotent?: boolean;
+  finalOutcome?: string | null;
+  stage1Status?: StageRunStatus;
+  stage2Status?: StageRunStatus;
+  stage3Status?: StageRunStatus;
+  skipStage1Requested?: boolean;
+  skipStage2Requested?: boolean;
 };
 
 export type PipelineSyncOk = {
@@ -154,6 +160,12 @@ export type PipelineSyncOk = {
   gateDecision?: "fecal" | "non_fecal";
   awaitingStage2Start?: boolean;
   awaitingStage3Start?: boolean;
+  finalOutcome?: string | null;
+  stage1Status?: StageRunStatus;
+  stage2Status?: StageRunStatus;
+  stage3Status?: StageRunStatus;
+  skipStage1Requested?: boolean;
+  skipStage2Requested?: boolean;
 };
 
 type BatchStartResult = {
@@ -273,7 +285,26 @@ function activeStage(run: PredictionPipelineRunRow): StageNumber | null {
 }
 
 function isUserSkippedStage2(run: PredictionPipelineRunRow): boolean {
+  if (run.skip_stage2_requested) return true;
   return run.stage2_status === "skipped" && run.stage3_status === "pending";
+}
+
+function runStatusFields(run: PredictionPipelineRunRow): {
+  finalOutcome: string | null;
+  stage1Status: StageRunStatus;
+  stage2Status: StageRunStatus;
+  stage3Status: StageRunStatus;
+  skipStage1Requested: boolean;
+  skipStage2Requested: boolean;
+} {
+  return {
+    finalOutcome: run.final_outcome,
+    stage1Status: run.stage1_status,
+    stage2Status: run.stage2_status,
+    stage3Status: run.stage3_status,
+    skipStage1Requested: run.skip_stage1_requested,
+    skipStage2Requested: run.skip_stage2_requested,
+  };
 }
 
 function shouldAwaitStage2Start(run: PredictionPipelineRunRow): boolean {
@@ -833,6 +864,8 @@ async function startRun(
       stage1Status: initialStatuses.stage1Status,
       stage2Status: initialStatuses.stage2Status,
       stage3Status: initialStatuses.stage3Status,
+      skipStage1Requested: mode === "pipeline" ? skipStage1 : false,
+      skipStage2Requested: mode === "pipeline" ? skipStage2 : false,
     });
   } catch (reason) {
     return { ok: false, error: dbErrorMessage(reason) };
@@ -1218,7 +1251,7 @@ export async function serviceFinalizePipelineRun(
       stage: null,
       persisted: true,
       remote: persistedPayload(run),
-      gateDecision: run.stage2_status === "skipped" ? "non_fecal" : undefined,
+      ...runStatusFields(run),
     };
   }
 
@@ -1235,6 +1268,7 @@ export async function serviceFinalizePipelineRun(
         stage: 3,
         persisted: true,
         awaitingStage3Start: true,
+        ...runStatusFields(run),
       };
     }
     if (shouldAwaitStage2Start(run)) {
@@ -1245,6 +1279,7 @@ export async function serviceFinalizePipelineRun(
         persisted: true,
         gateDecision: "fecal",
         awaitingStage2Start: true,
+        ...runStatusFields(run),
       };
     }
     return {
@@ -1292,6 +1327,7 @@ export async function serviceFinalizePipelineRun(
         userId,
         remote,
       });
+      const updated = await getPipelineRunForUser(run.id, userId);
       return {
         ok: true,
         runStatus: stage1.runStatus,
@@ -1301,6 +1337,7 @@ export async function serviceFinalizePipelineRun(
         gateDecision: stage1.gateDecision,
         awaitingStage2Start: stage1.awaitingStage2Start,
         awaitingStage3Start: stage1.awaitingStage3Start,
+        ...(updated ? runStatusFields(updated) : runStatusFields(run)),
       };
     }
 
@@ -1310,6 +1347,7 @@ export async function serviceFinalizePipelineRun(
         userId,
         remote,
       });
+      const updated = await getPipelineRunForUser(run.id, userId);
       return {
         ok: true,
         runStatus: stage2.runStatus,
@@ -1317,6 +1355,7 @@ export async function serviceFinalizePipelineRun(
         persisted: true,
         remote: remoteObj,
         awaitingStage3Start: stage2.awaitingStage3Start,
+        ...(updated ? runStatusFields(updated) : runStatusFields(run)),
       };
     }
 
@@ -1325,12 +1364,14 @@ export async function serviceFinalizePipelineRun(
       userId,
       remote,
     });
+    const updated = await getPipelineRunForUser(run.id, userId);
     return {
       ok: true,
       runStatus: stage3.runStatus,
       stage: 3,
       persisted: true,
       remote: remoteObj,
+      ...(updated ? runStatusFields(updated) : runStatusFields(run)),
     };
   } catch (reason) {
     const message = runError(reason);
@@ -1360,7 +1401,7 @@ export async function serviceSyncPipelineRun(
       stage: null,
       persisted: true,
       remote: persistedPayload(run),
-      gateDecision: run.stage2_status === "skipped" ? "non_fecal" : undefined,
+      ...runStatusFields(run),
     };
   }
 
@@ -1377,6 +1418,7 @@ export async function serviceSyncPipelineRun(
         stage: 3,
         persisted: true,
         awaitingStage3Start: true,
+        ...runStatusFields(run),
       };
     }
     if (shouldAwaitStage2Start(run)) {
@@ -1387,6 +1429,7 @@ export async function serviceSyncPipelineRun(
         persisted: true,
         gateDecision: "fecal",
         awaitingStage2Start: true,
+        ...runStatusFields(run),
       };
     }
     return {
@@ -1432,6 +1475,7 @@ export async function serviceSyncPipelineRun(
         userId,
         remote,
       });
+      const updated = await getPipelineRunForUser(run.id, userId);
       return {
         ok: true,
         runStatus: stage1.runStatus,
@@ -1441,6 +1485,7 @@ export async function serviceSyncPipelineRun(
         gateDecision: stage1.gateDecision,
         awaitingStage2Start: stage1.awaitingStage2Start,
         awaitingStage3Start: stage1.awaitingStage3Start,
+        ...(updated ? runStatusFields(updated) : runStatusFields(run)),
       };
     }
 
@@ -1450,6 +1495,7 @@ export async function serviceSyncPipelineRun(
         userId,
         remote,
       });
+      const updated = await getPipelineRunForUser(run.id, userId);
       return {
         ok: true,
         runStatus: stage2.runStatus,
@@ -1457,6 +1503,7 @@ export async function serviceSyncPipelineRun(
         persisted: true,
         remote: remoteObj,
         awaitingStage3Start: stage2.awaitingStage3Start,
+        ...(updated ? runStatusFields(updated) : runStatusFields(run)),
       };
     }
 
@@ -1465,12 +1512,14 @@ export async function serviceSyncPipelineRun(
       userId,
       remote,
     });
+    const updated = await getPipelineRunForUser(run.id, userId);
     return {
       ok: true,
       runStatus: stage3.runStatus,
       stage: 3,
       persisted: true,
       remote: remoteObj,
+      ...(updated ? runStatusFields(updated) : runStatusFields(run)),
     };
   } catch (reason) {
     return { ok: false, error: runError(reason) };
