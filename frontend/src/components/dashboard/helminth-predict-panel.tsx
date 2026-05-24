@@ -26,6 +26,7 @@ import {
   getStage3LimeWsUrl,
   getStage3ModelLabel,
   getStage3WsOriginForClient,
+  STAGE3_LIME_UI_ENABLED,
 } from "@/lib/helminth-config";
 import { extractGradcamPayload, extractLimePayload } from "@/lib/explanation-ws";
 import {
@@ -46,6 +47,7 @@ import {
   GenerateExplanationsCard,
   PipelineCacheHitBanner,
 } from "@/components/dashboard/pipeline-cache-ui";
+import { PipelineStageSkipControls } from "@/components/dashboard/pipeline-stage-skip-controls";
 import { computeImageHashSha256 } from "@/lib/image-hash";
 import { DetectionImagePreview } from "@/components/dashboard/detection-image-preview";
 import { getDetectionPaletteEntryForClass } from "@/lib/detection-palette";
@@ -286,6 +288,8 @@ export function HelminthPredictPanel({
   const [explanationsStarted, setExplanationsStarted] = useState(false);
   const [explanationsStarting, setExplanationsStarting] = useState(false);
   const [forceRerun, setForceRerun] = useState(false);
+  const [skipStage1, setSkipStage1] = useState(false);
+  const [skipStage2, setSkipStage2] = useState(false);
   const [stage2LimeHistory, setStage2LimeHistory] = useState<LimeRunEntry[]>([]);
   const [stage2LimeBusy, setStage2LimeBusy] = useState(false);
   const [stage3ModelFilename, setStage3ModelFilename] = useState<string>(
@@ -321,6 +325,8 @@ export function HelminthPredictPanel({
   // Dedup keys for stream-per-model GradCAM uploads, scoped to the current run.
   const stage1GradcamUploadedRef = useRef<Set<string>>(new Set());
   const stage2GradcamUploadedRef = useRef<Set<string>>(new Set());
+  const userSkipStage1Ref = useRef(false);
+  const userSkipStage2Ref = useRef(false);
   const idempotencyKeyRef = useRef<string>(
     typeof crypto !== "undefined" ? crypto.randomUUID() : "local-idem",
   );
@@ -1093,7 +1099,7 @@ export function HelminthPredictPanel({
       if (result.stage === 1 && result.persisted) {
         setStage1Status("complete");
       }
-      if (result.gateDecision === "non_fecal") {
+      if (result.gateDecision === "non_fecal" && !userSkipStage2Ref.current) {
         setStage2Status("skipped");
         setStage3Status("skipped");
         await finishPipeline(
@@ -1102,7 +1108,11 @@ export function HelminthPredictPanel({
         return;
       }
       if (result.awaitingStage3Start) {
-        setStage2Status("complete");
+        if (userSkipStage2Ref.current || result.stage === 1) {
+          setStage2Status("skipped");
+        } else {
+          setStage2Status("complete");
+        }
         await startStage3(runId);
         return;
       }
@@ -1213,12 +1223,20 @@ export function HelminthPredictPanel({
       setStage1JobId(null);
       setStage2JobId(null);
       setStage3JobId(null);
-      setStage3ModelFilename(DEFAULT_STAGE3_MODEL_FILENAME);
+      if (!opts?.keepFile) {
+        setStage3ModelFilename(DEFAULT_STAGE3_MODEL_FILENAME);
+      }
       setIsCachedRun(false);
       setCacheSourceCreatedAt(null);
       setExplanationsStarted(false);
       setExplanationsStarting(false);
-      setForceRerun(false);
+      if (!opts?.keepFile) {
+        setForceRerun(false);
+        setSkipStage1(false);
+        setSkipStage2(false);
+        userSkipStage1Ref.current = false;
+        userSkipStage2Ref.current = false;
+      }
       idempotencyKeyRef.current = crypto.randomUUID();
       if (!opts?.keepFile) {
         fileRef.current = null;
@@ -1899,14 +1917,31 @@ export function HelminthPredictPanel({
   const onSubmit = async (opts?: { force?: boolean }) => {
     if (!file) return;
     const useForce = opts?.force ?? forceRerun;
+    const useSkipStage1 = skipStage1;
+    const useSkipStage2 = skipStage2;
     resetPanelState({ keepFile: true });
     fileRef.current = file;
     if (useForce) setForceRerun(true);
-    setStage1Status("active");
+    userSkipStage1Ref.current = useSkipStage1;
+    userSkipStage2Ref.current = useSkipStage2;
+
+    const startStage: StageNumber =
+      useSkipStage1 && useSkipStage2 ? 3 : useSkipStage1 ? 2 : 1;
+
+    if (useSkipStage1) setStage1Status("skipped");
+    if (useSkipStage1 && useSkipStage2) setStage2Status("skipped");
+    if (startStage === 1) setStage1Status("active");
+    else if (startStage === 2) setStage2Status("active");
+    else setStage3Status("active");
+
     setLiveMessage(
       useForce
-        ? "Force re-running full pipeline…"
-        : "Uploading image and starting Stage 1…",
+        ? "Force re-running pipeline…"
+        : startStage === 3
+          ? "Uploading image and starting Stage 3…"
+          : startStage === 2
+            ? "Uploading image and starting Stage 2…"
+            : "Uploading image and starting Stage 1…",
     );
 
     const fd = new FormData();
@@ -1915,6 +1950,9 @@ export function HelminthPredictPanel({
       const imageHash = await computeImageHashSha256(file);
       fd.set("imageHash", imageHash);
       if (useForce) fd.set("forceRerun", "true");
+      if (useSkipStage1) fd.set("skipStage1", "true");
+      if (useSkipStage2) fd.set("skipStage2", "true");
+      fd.set("stage3ModelFilename", stage3ModelFilename);
     } catch {
       /* hash optional — server still runs without cache */
     }
@@ -1952,12 +1990,11 @@ export function HelminthPredictPanel({
       setProgress({ done: 0, total: data.stage.totalModels ?? 0 });
 
       if (data.stage.stage === 1) {
-        setStage1Status("active");
         connectWebSocket(data.stage.externalJobId, data.id, 1);
-      } else {
-        setStage1Status("skipped");
-        setStage2Status("active");
+      } else if (data.stage.stage === 2) {
         connectWebSocket(data.stage.externalJobId, data.id, 2);
+      } else {
+        connectWebSocket(data.stage.externalJobId, data.id, 3);
       }
     } catch (reason) {
       const message =
@@ -1983,16 +2020,20 @@ export function HelminthPredictPanel({
       ? "Fecal"
       : stage1Vote?.majorityClass === 1
         ? "Non fecal"
-        : stage1Status === "active"
-          ? "Running"
-          : "Waiting";
+        : stage1Status === "skipped"
+          ? "Skipped (your selection)"
+          : stage1Status === "active"
+            ? "Running"
+            : "Waiting";
   const stage2ResultLabel =
     stage2Vote?.majorityClass === 0
       ? "Helminth detected"
       : stage2Vote?.majorityClass === 1
         ? "No helminth"
         : stage2Status === "skipped"
-          ? "Not run (Stage 1 was non fecal)"
+          ? userSkipStage2Ref.current
+            ? "Skipped (your selection)"
+            : "Not run (Stage 1 was non fecal)"
           : stage2Status === "active"
             ? "Running"
             : "Waiting";
@@ -2003,9 +2044,13 @@ export function HelminthPredictPanel({
       : stage3Status === "active"
         ? "Running"
         : stage3Status === "skipped"
-          ? stage2Status === "skipped"
-            ? "Not run (Stage 1 non fecal)"
-            : "Not run (no helminth)"
+          ? userSkipStage2Ref.current || userSkipStage1Ref.current
+            ? stage2Status === "skipped" && !userSkipStage2Ref.current
+              ? "Not run (Stage 1 non fecal)"
+              : "Not run (no helminth at Stage 2)"
+            : stage2Status === "skipped"
+              ? "Not run (Stage 1 non fecal)"
+              : "Not run (no helminth)"
           : "Waiting";
 
   const detectionOverlayItems: DetectionBoxItem[] = useMemo(
@@ -2097,6 +2142,13 @@ export function HelminthPredictPanel({
         <Stage3ModelSelect
           value={stage3ModelFilename}
           onChange={setStage3ModelFilename}
+          disabled={isRunning}
+        />
+        <PipelineStageSkipControls
+          skipStage1={skipStage1}
+          skipStage2={skipStage2}
+          onSkipStage1Change={setSkipStage1}
+          onSkipStage2Change={setSkipStage2}
           disabled={isRunning}
         />
         <Button
@@ -2263,26 +2315,27 @@ export function HelminthPredictPanel({
                 />
               )}
 
-              {(stage3JobId || stage3LimeHistory.length > 0) && (
-                <StageLimeCard
-                  stageLabel="Stage 3"
-                  modelFilenames={STAGE3_MODEL_FILENAMES}
-                  shortName={shortModelName}
-                  disabled={!stage3JobId || stage3Status === "active"}
-                  disabledReason={
-                    stage3Status === "active"
-                      ? "LIME is available after Stage 3 finishes."
-                      : !stage3JobId
-                        ? "Stage 3 LIME unlocks after species detection starts."
-                        : undefined
-                  }
-                  busy={stage3LimeBusy}
-                  history={stage3LimeHistory}
-                  onRun={runStage3Lime}
-                  fixedModelFilename={stage3ModelFilename}
-                  fixedModelLabel={getStage3ModelLabel(stage3ModelFilename)}
-                />
-              )}
+              {STAGE3_LIME_UI_ENABLED &&
+                (stage3JobId || stage3LimeHistory.length > 0) && (
+                  <StageLimeCard
+                    stageLabel="Stage 3"
+                    modelFilenames={STAGE3_MODEL_FILENAMES}
+                    shortName={shortModelName}
+                    disabled={!stage3JobId || stage3Status === "active"}
+                    disabledReason={
+                      stage3Status === "active"
+                        ? "LIME is available after Stage 3 finishes."
+                        : !stage3JobId
+                          ? "Stage 3 LIME unlocks after species detection starts."
+                          : undefined
+                    }
+                    busy={stage3LimeBusy}
+                    history={stage3LimeHistory}
+                    onRun={runStage3Lime}
+                    fixedModelFilename={stage3ModelFilename}
+                    fixedModelLabel={getStage3ModelLabel(stage3ModelFilename)}
+                  />
+                )}
             </>
           )}
 
