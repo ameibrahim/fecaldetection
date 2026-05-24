@@ -53,6 +53,11 @@ import { DetectionImagePreview } from "@/components/dashboard/detection-image-pr
 import { getDetectionPaletteEntryForClass } from "@/lib/detection-palette";
 import { buildDetectionOverlayItemsFromResults } from "@/lib/stage3-detection-overlay";
 import { resolvePipelineTerminalOutcome } from "@/lib/pipeline-terminal-outcome";
+import {
+  previewUrlFromFile,
+  revokePreviewUrl,
+} from "@/lib/tiff-preview";
+import { Skeleton } from "@/components/ui/skeleton";
 import type { DetectionBoxItem } from "@/components/dashboard/detection-image-preview";
 import {
   AlertCircle,
@@ -272,6 +277,8 @@ export function HelminthPredictPanel({
   const [stage1Vote, setStage1Vote] = useState<StageVoteSummary | null>(null);
   const [stage2Vote, setStage2Vote] = useState<StageVoteSummary | null>(null);
   const [localImageUrl, setLocalImageUrl] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
   const [gradcamPanel, setGradcamPanel] = useState<{
     phase: "idle" | "loading" | "complete" | "error";
     connectionError: string | null;
@@ -342,12 +349,41 @@ export function HelminthPredictPanel({
   useEffect(() => {
     if (!file) {
       setLocalImageUrl(null);
+      setPreviewLoading(false);
+      setPreviewError(null);
       return;
     }
-    const url = URL.createObjectURL(file);
-    setLocalImageUrl(url);
+
+    let cancelled = false;
+    let createdUrl: string | null = null;
+    setPreviewLoading(true);
+    setPreviewError(null);
+    setLocalImageUrl(null);
+
+    void previewUrlFromFile(file)
+      .then((url) => {
+        if (cancelled) {
+          revokePreviewUrl(url);
+          return;
+        }
+        createdUrl = url;
+        setLocalImageUrl(url);
+        setPreviewLoading(false);
+      })
+      .catch((reason: unknown) => {
+        if (cancelled) return;
+        const message =
+          reason instanceof Error
+            ? reason.message
+            : "Could not preview this TIFF image.";
+        setPreviewError(message);
+        setPreviewLoading(false);
+        toast.error("Image preview unavailable", { description: message });
+      });
+
     return () => {
-      URL.revokeObjectURL(url);
+      cancelled = true;
+      revokePreviewUrl(createdUrl);
     };
   }, [file]);
 
@@ -1381,6 +1417,8 @@ export function HelminthPredictPanel({
       setProgress({ done: 0, total: 0 });
       setLiveMessage("");
       setPipelineOutcome(null);
+      setPreviewLoading(false);
+      setPreviewError(null);
       pipelineTerminalRef.current = false;
       if (opts?.scroll && typeof document !== "undefined") {
         const target = document.getElementById("dashboard-predict-card");
@@ -2246,7 +2284,7 @@ export function HelminthPredictPanel({
         <label className="cursor-pointer">
           <input
             type="file"
-            accept="image/jpeg,image/png,image/webp,image/tiff"
+            accept="image/jpeg,image/png,image/webp,image/tiff,image/x-tiff,.tif,.tiff"
             className="sr-only"
             onChange={(e) => setFile(e.target.files?.[0] ?? null)}
           />
@@ -2505,7 +2543,7 @@ export function HelminthPredictPanel({
             </Card>
           )}
 
-          {localImageUrl &&
+          {(previewLoading || previewError || localImageUrl) &&
             (stage3Status === "active" || stage3Status === "complete") && (
               <Card className="border-border/80">
                 <CardHeader>
@@ -2516,10 +2554,21 @@ export function HelminthPredictPanel({
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
+                  {previewLoading ? (
+                    <div role="status" aria-live="polite" className="space-y-2">
+                      <Skeleton className="h-[min(40vh,320px)] w-full rounded-lg" />
+                      <p className="sr-only">Loading image preview…</p>
+                    </div>
+                  ) : previewError ? (
+                    <p className="text-sm text-muted-foreground" role="status">
+                      Preview unavailable: {previewError}
+                    </p>
+                  ) : localImageUrl ? (
                   <DetectionImagePreview
                     objectUrl={localImageUrl}
                     items={detectionOverlayItems}
                   />
+                  ) : null}
                   {stage3Status === "complete" && detectionOverlayItems.length === 0 ? (
                     <p className="text-sm text-muted-foreground">
                       No objects above the model confidence threshold.

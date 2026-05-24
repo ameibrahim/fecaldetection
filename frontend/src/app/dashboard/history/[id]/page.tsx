@@ -201,6 +201,7 @@ export default async function DashboardHistoryRunPage({
             <RunDetailImage
               src={`/api/predictions/pipeline-run/${run.id}/image/stage3-annotated`}
               alt="Stage 3 annotated slide"
+              tiffDecode={false}
             />
           </section>
         ) : run.image_object_key && overlayItems.length > 0 ? (
@@ -213,6 +214,8 @@ export default async function DashboardHistoryRunPage({
               src={`/api/predictions/pipeline-run/${run.id}/image`}
               alt="Uploaded slide with detections"
               items={overlayItems}
+              tiffDecode
+              filenameHint={run.original_filename}
             />
           </section>
         ) : run.image_object_key ? (
@@ -223,6 +226,8 @@ export default async function DashboardHistoryRunPage({
             <RunDetailImage
               src={`/api/predictions/pipeline-run/${run.id}/image`}
               alt="Uploaded slide"
+              tiffDecode
+              filenameHint={run.original_filename}
             />
           </section>
         ) : null}
