@@ -20,7 +20,7 @@ import {
   Inbox,
   RefreshCcw,
 } from "lucide-react";
-import Image from "next/image";
+import { HistoryThumbnail } from "@/components/dashboard/history-thumbnail";
 import Link from "next/link";
 import {
   useCallback,
@@ -402,6 +402,7 @@ function HistoryRow({
     : row.image_object_key
       ? `/api/predictions/pipeline-run/${row.id}/image`
       : null;
+  const thumbIsAnnotated = Boolean(row.stage3_annotated_image_object_key);
   const tone = statusTone(row);
   const Wrapper = reduceMotion ? "li" : motion.li;
   const wrapperMotion = reduceMotion
@@ -429,14 +430,11 @@ function HistoryRow({
       >
         <div className="relative shrink-0">
           {thumbSrc ? (
-            <Image
+            <HistoryThumbnail
               src={thumbSrc}
               alt={row.original_filename ?? "Prediction image"}
-              width={80}
-              height={80}
-              className="size-20 rounded-lg border border-border/70 object-cover"
-              loading="lazy"
-              unoptimized
+              filename={row.original_filename}
+              isAnnotatedPng={thumbIsAnnotated}
             />
           ) : (
             <div className="flex size-20 items-center justify-center rounded-lg border border-dashed border-border/70 bg-muted/30 text-muted-foreground">
