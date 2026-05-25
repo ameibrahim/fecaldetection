@@ -48,6 +48,11 @@ import {
   PipelineCacheHitBanner,
 } from "@/components/dashboard/pipeline-cache-ui";
 import { PipelineStageSkipControls } from "@/components/dashboard/pipeline-stage-skip-controls";
+import {
+  UnfinishedRunsBanner,
+  UnfinishedRunsSheet,
+} from "@/components/dashboard/unfinished-runs-sheet";
+import type { UnfinishedRunItem } from "@/lib/unfinished-run-meta";
 import { computeImageHashSha256 } from "@/lib/image-hash";
 import { DetectionImagePreview } from "@/components/dashboard/detection-image-preview";
 import { getDetectionPaletteEntryForClass } from "@/lib/detection-palette";
@@ -109,6 +114,24 @@ type PipelineSubmitResponse = {
     externalJobId: string;
     totalModels: number;
   };
+};
+
+type UnfinishedRunsResponse = {
+  ok: true;
+  runs: UnfinishedRunItem[];
+  count: number;
+  limit: number;
+  canStartNew: boolean;
+};
+
+type PipelineResumeResponse = {
+  ok: true;
+  id: string;
+  resumeKind: "websocket" | "sync";
+  stage: StageNumber | null;
+  externalJobId?: string;
+  totalModels?: number;
+  sync?: PipelineStatusPayload;
 };
 
 type WsPayload = {
@@ -351,6 +374,19 @@ export function HelminthPredictPanel({
   const idempotencyKeyRef = useRef<string>(
     typeof crypto !== "undefined" ? crypto.randomUUID() : "local-idem",
   );
+  const pendingSubmitAfterRecoveryRef = useRef(false);
+  const [unfinishedRuns, setUnfinishedRuns] = useState<UnfinishedRunItem[]>([]);
+  const [unfinishedMeta, setUnfinishedMeta] = useState({
+    count: 0,
+    limit: 3,
+    canStartNew: true,
+  });
+  const [unfinishedSheetOpen, setUnfinishedSheetOpen] = useState(false);
+  const [unfinishedRefreshing, setUnfinishedRefreshing] = useState(false);
+  const [unfinishedBusyRunId, setUnfinishedBusyRunId] = useState<string | null>(
+    null,
+  );
+  const [unfinishedBulkBusy, setUnfinishedBulkBusy] = useState(false);
 
   useEffect(() => {
     if (!file) {
@@ -1345,6 +1381,168 @@ export function HelminthPredictPanel({
     handleStatusResultRef.current = handleStatusResult;
   }, [handleStatusResult]);
 
+  const refreshUnfinishedRuns = useCallback(async () => {
+    setUnfinishedRefreshing(true);
+    try {
+      const res = await fetch("/api/predictions/pipeline-run/processing", {
+        credentials: "include",
+        headers: delegateAuthHeaders,
+        cache: "no-store",
+      });
+      const data = (await res.json()) as UnfinishedRunsResponse & { error?: string };
+      if (!res.ok || !data.ok) return;
+      setUnfinishedRuns(data.runs);
+      setUnfinishedMeta({
+        count: data.count,
+        limit: data.limit,
+        canStartNew: data.canStartNew,
+      });
+    } finally {
+      setUnfinishedRefreshing(false);
+    }
+  }, [delegateAuthHeaders]);
+
+  useEffect(() => {
+    void refreshUnfinishedRuns();
+  }, [refreshUnfinishedRuns]);
+
+  useEffect(() => {
+    if (pipelineOutcome) {
+      void refreshUnfinishedRuns();
+    }
+  }, [pipelineOutcome, refreshUnfinishedRuns]);
+
+  const applyResumeResult = useCallback(
+    async (data: PipelineResumeResponse) => {
+      runIdRef.current = data.id;
+      setUnfinishedSheetOpen(false);
+      setError(null);
+      setPipelineOutcome(null);
+      pipelineTerminalRef.current = false;
+      stage2StartedRef.current = false;
+      stage3StartedRef.current = false;
+
+      if (data.resumeKind === "sync" && data.sync) {
+        await handleStatusResultRef.current?.(data.id, data.sync);
+        void refreshUnfinishedRuns();
+        return;
+      }
+
+      if (
+        data.resumeKind === "websocket" &&
+        data.stage &&
+        data.externalJobId
+      ) {
+        currentStageRef.current = data.stage;
+        setProgress({ done: 0, total: data.totalModels ?? 0 });
+        if (data.stage === 1) {
+          setStage1Status("active");
+        } else if (data.stage === 2) {
+          setStage2Status("active");
+        } else {
+          setStage3Status("active");
+        }
+        setLiveMessage(`Resumed Stage ${data.stage}. Opening live connection…`);
+        connectWebSocket(data.externalJobId, data.id, data.stage);
+        void refreshUnfinishedRuns();
+      }
+    },
+    [connectWebSocket, refreshUnfinishedRuns],
+  );
+
+  const handleCancelUnfinishedRun = useCallback(
+    async (runId: string) => {
+      setUnfinishedBusyRunId(runId);
+      try {
+        const res = await fetch(
+          `/api/predictions/pipeline-run/${encodeURIComponent(runId)}/cancel`,
+          {
+            method: "POST",
+            credentials: "include",
+            headers: delegateAuthHeaders,
+          },
+        );
+        const data = (await res.json()) as { ok?: boolean; error?: string };
+        if (!res.ok || !data.ok) {
+          throw new Error(data.error || "Could not cancel run.");
+        }
+        await refreshUnfinishedRuns();
+        toast.success("Run cancelled", {
+          description: "You can start a new prediction now.",
+        });
+      } catch (reason) {
+        const message =
+          reason instanceof Error ? reason.message : "Could not cancel run.";
+        toast.error(message);
+      } finally {
+        setUnfinishedBusyRunId(null);
+      }
+    },
+    [delegateAuthHeaders, refreshUnfinishedRuns],
+  );
+
+  const handleResumeUnfinishedRun = useCallback(
+    async (runId: string) => {
+      setUnfinishedBusyRunId(runId);
+      try {
+        teardownWs();
+        const res = await fetch(
+          `/api/predictions/pipeline-run/${encodeURIComponent(runId)}/resume`,
+          {
+            method: "POST",
+            credentials: "include",
+            headers: delegateAuthHeaders,
+          },
+        );
+        const data = (await res.json()) as PipelineResumeResponse & {
+          error?: string;
+        };
+        if (!res.ok || !data.ok) {
+          throw new Error(data.error || "Could not resume run.");
+        }
+        await applyResumeResult(data);
+      } catch (reason) {
+        const message =
+          reason instanceof Error ? reason.message : "Could not resume run.";
+        toast.error(message);
+      } finally {
+        setUnfinishedBusyRunId(null);
+      }
+    },
+    [applyResumeResult, delegateAuthHeaders, teardownWs],
+  );
+
+  const handleCancelAllStaleRuns = useCallback(async () => {
+    setUnfinishedBulkBusy(true);
+    try {
+      const res = await fetch(
+        "/api/predictions/pipeline-run/processing/cancel-stale",
+        {
+          method: "POST",
+          credentials: "include",
+          headers: delegateAuthHeaders,
+        },
+      );
+      const data = (await res.json()) as { ok?: boolean; cancelled?: number; error?: string };
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || "Could not cancel stalled runs.");
+      }
+      await refreshUnfinishedRuns();
+      toast.success("Stalled runs cleared", {
+        description:
+          data.cancelled && data.cancelled > 0
+            ? `${data.cancelled} run(s) cancelled.`
+            : "No stalled runs needed clearing.",
+      });
+    } catch (reason) {
+      const message =
+        reason instanceof Error ? reason.message : "Could not cancel stalled runs.";
+      toast.error(message);
+    } finally {
+      setUnfinishedBulkBusy(false);
+    }
+  }, [delegateAuthHeaders, refreshUnfinishedRuns]);
+
   useEffect(
     () => () => {
       teardownWs();
@@ -2073,6 +2271,35 @@ export function HelminthPredictPanel({
 
   const onSubmit = async (opts?: { force?: boolean }) => {
     if (!file) return;
+
+    try {
+      const slotRes = await fetch("/api/predictions/pipeline-run/processing", {
+        credentials: "include",
+        headers: delegateAuthHeaders,
+        cache: "no-store",
+      });
+      const slotData = (await slotRes.json()) as UnfinishedRunsResponse & {
+        error?: string;
+      };
+      if (slotRes.ok && slotData.ok) {
+        setUnfinishedRuns(slotData.runs);
+        setUnfinishedMeta({
+          count: slotData.count,
+          limit: slotData.limit,
+          canStartNew: slotData.canStartNew,
+        });
+        if (!slotData.canStartNew) {
+          pendingSubmitAfterRecoveryRef.current = true;
+          setUnfinishedSheetOpen(true);
+          setError(null);
+          setLiveMessage("");
+          return;
+        }
+      }
+    } catch {
+      /* proceed — server will enforce limit if check fails */
+    }
+
     const useForce = opts?.force ?? forceRerun;
     const useSkipStage1 = skipStage1;
     const useSkipStage2 = skipStage2;
@@ -2131,6 +2358,17 @@ export function HelminthPredictPanel({
         ok?: boolean;
       };
       if (!res.ok || !data.id) {
+        if (res.status === 429) {
+          pendingSubmitAfterRecoveryRef.current = true;
+          await refreshUnfinishedRuns();
+          setUnfinishedSheetOpen(true);
+          setStage1Status("idle");
+          setStage2Status("idle");
+          setStage3Status("idle");
+          setError(null);
+          setLiveMessage("");
+          return;
+        }
         throw new Error(data.error || "Upload failed.");
       }
 
@@ -2156,6 +2394,20 @@ export function HelminthPredictPanel({
     } catch (reason) {
       const message =
         reason instanceof Error ? reason.message : "Upload failed.";
+      if (
+        message.includes("Too many runs in progress") ||
+        message.includes("Too many runs")
+      ) {
+        pendingSubmitAfterRecoveryRef.current = true;
+        await refreshUnfinishedRuns();
+        setUnfinishedSheetOpen(true);
+        setStage1Status("idle");
+        setStage2Status("idle");
+        setStage3Status("idle");
+        setError(null);
+        setLiveMessage("");
+        return;
+      }
       setStage1Status("idle");
       setStage2Status("idle");
       setStage3Status("idle");
@@ -2238,6 +2490,41 @@ export function HelminthPredictPanel({
         </p>
         <PipelineStepper steps={stepperStatuses} />
       </div>
+
+      <UnfinishedRunsBanner
+        count={unfinishedMeta.count}
+        staleCount={unfinishedRuns.filter((run) => run.stale).length}
+        onReview={() => setUnfinishedSheetOpen(true)}
+      />
+
+      <UnfinishedRunsSheet
+        open={unfinishedSheetOpen}
+        onOpenChange={(open) => {
+          setUnfinishedSheetOpen(open);
+          if (
+            !open &&
+            pendingSubmitAfterRecoveryRef.current &&
+            unfinishedMeta.canStartNew &&
+            fileRef.current
+          ) {
+            pendingSubmitAfterRecoveryRef.current = false;
+            queueMicrotask(() => {
+              void onSubmit();
+            });
+          }
+        }}
+        runs={unfinishedRuns}
+        count={unfinishedMeta.count}
+        limit={unfinishedMeta.limit}
+        canStartNew={unfinishedMeta.canStartNew}
+        busyRunId={unfinishedBusyRunId}
+        bulkBusy={unfinishedBulkBusy}
+        onRefresh={() => void refreshUnfinishedRuns()}
+        refreshing={unfinishedRefreshing}
+        onResume={(runId) => void handleResumeUnfinishedRun(runId)}
+        onCancel={(runId) => void handleCancelUnfinishedRun(runId)}
+        onCancelAllStale={() => void handleCancelAllStaleRuns()}
+      />
 
       {error && pipelineOutcome?.kind !== "failed" && (
         <div

@@ -1,4 +1,5 @@
 import {
+  DEFAULT_STAGE3_MODEL_FILENAME,
   STAGE1_MODEL_FILENAMES,
   STAGE1_MODEL_INPUT_SIZE,
   STAGE2_MODEL_FILENAMES,
@@ -22,7 +23,10 @@ import {
   insertIdempotencyKey,
   insertPipelineRun,
   listPipelineHistory,
+  listProcessingRunsForUser,
+  markPipelineRunCancelled,
   markPipelineRunFailed,
+  MAX_CONCURRENT_PROCESSING,
   recordCacheSignatureHit,
   saveStage1Result,
   saveStage2Result,
@@ -37,6 +41,7 @@ import {
   type PipelineRunStatus,
   type PredictionCacheSignatureRow,
   type PredictionPipelineRunRow,
+  type ProcessingPipelineRunRow,
   type StageRunStatus,
   type VoteSummary,
 } from "@/lib/pipeline-db";
@@ -59,8 +64,19 @@ import {
   fetchRemoteJobStatus,
   type HelminthStatusPayload,
 } from "@/lib/helminth-remote";
+import {
+  activeStageFromRow,
+  buildUnfinishedRunItem,
+  externalJobIdForStage,
+  isAwaitingStage2Start as isAwaitingStage2StartRow,
+  isAwaitingStage3Start as isAwaitingStage3StartRow,
+  isRunStaleByAge,
+  type UnfinishedRunItem,
+} from "@/lib/unfinished-run-meta";
 
 const MAX_BYTES = 15 * 1024 * 1024;
+/** Runs idle longer than this are treated as stalled (Docker restart, closed tab, etc.). */
+const STALE_RUN_MS = 45 * 60 * 1000;
 const ALLOWED = new Set([
   "image/jpeg",
   "image/png",
@@ -413,6 +429,7 @@ async function submitFromCache(
   }
 
   try {
+    await releaseStaleProcessingSlots(userId);
     await assertCanStartPipelineRun(userId);
   } catch (reason) {
     return { ok: false, error: runError(reason), code: "429" };
@@ -830,6 +847,7 @@ async function startRun(
   }
 
   try {
+    await releaseStaleProcessingSlots(userId);
     await assertCanStartPipelineRun(userId);
   } catch (reason) {
     return { ok: false, error: runError(reason), code: "429" };
@@ -1660,4 +1678,425 @@ export async function serviceStartExplanations(
   }
 
   return out;
+}
+
+function processingRowFromRun(
+  run: PredictionPipelineRunRow,
+): ProcessingPipelineRunRow {
+  return {
+    id: run.id,
+    created_at: run.created_at,
+    updated_at: run.updated_at,
+    original_filename: run.original_filename,
+    image_object_key: run.image_object_key,
+    stage1_status: run.stage1_status,
+    stage2_status: run.stage2_status,
+    stage3_status: run.stage3_status,
+    stage1_external_job_id: run.stage1_external_job_id,
+    stage2_external_job_id: run.stage2_external_job_id,
+    stage3_external_job_id: run.stage3_external_job_id,
+    stage3_model_filename: run.stage3_model_filename,
+    skip_stage1_requested: run.skip_stage1_requested,
+    skip_stage2_requested: run.skip_stage2_requested,
+  };
+}
+
+async function probeProcessingRunStale(
+  row: ProcessingPipelineRunRow,
+): Promise<{ stale: boolean; reason: string | null }> {
+  if (isRunStaleByAge(row, STALE_RUN_MS)) {
+    return {
+      stale: true,
+      reason: "This run has not updated in over 45 minutes.",
+    };
+  }
+
+  const active = activeStageFromRow(row);
+  if (!active) {
+    if (isAwaitingStage2StartRow(row) || isAwaitingStage3StartRow(row)) {
+      return { stale: false, reason: null };
+    }
+    return {
+      stale: true,
+      reason: "Run is waiting in an unexpected state.",
+    };
+  }
+
+  const jobId = externalJobIdForStage(row, active);
+  if (!jobId) {
+    return {
+      stale: true,
+      reason: "Active stage has no inference job id.",
+    };
+  }
+
+  const base =
+    active === 1
+      ? getStage1ApiBaseUrl()
+      : active === 2
+        ? getStage2ApiBaseUrl()
+        : getStage3ApiBaseUrl();
+  try {
+    await fetchRemoteJobStatus(base, jobId);
+    return { stale: false, reason: null };
+  } catch (reason) {
+    const message = runError(reason);
+    if (
+      message.includes("404") ||
+      message.includes("Job not found") ||
+      message.includes("Not found.")
+    ) {
+      return {
+        stale: true,
+        reason: "Inference job no longer exists (service may have restarted).",
+      };
+    }
+    if (message.includes("Could not reach helminth API")) {
+      return {
+        stale: true,
+        reason: "Inference service is unreachable.",
+      };
+    }
+    return { stale: false, reason: null };
+  }
+}
+
+async function releaseStaleProcessingSlots(userId: string): Promise<number> {
+  const rows = await listProcessingRunsForUser(userId);
+  let released = 0;
+  for (const row of rows) {
+    const probe = await probeProcessingRunStale(row);
+    if (!probe.stale) continue;
+    await markPipelineRunCancelled({
+      runId: row.id,
+      userId,
+      stage: activeStageFromRow(row) ?? undefined,
+    });
+    released += 1;
+  }
+  return released;
+}
+
+export type PipelineUnfinishedListOk = {
+  ok: true;
+  runs: UnfinishedRunItem[];
+  count: number;
+  limit: number;
+  canStartNew: boolean;
+};
+
+export async function serviceListUnfinishedRuns(
+  userId: string,
+): Promise<PipelineUnfinishedListOk | PipelineErr> {
+  try {
+    const rows = await listProcessingRunsForUser(userId);
+    const runs: UnfinishedRunItem[] = [];
+    for (const row of rows) {
+      const probe = await probeProcessingRunStale(row);
+      runs.push(
+        buildUnfinishedRunItem({
+          row,
+          stale: probe.stale,
+          staleReason: probe.reason,
+        }),
+      );
+    }
+    return {
+      ok: true,
+      runs,
+      count: runs.length,
+      limit: MAX_CONCURRENT_PROCESSING,
+      canStartNew: runs.length < MAX_CONCURRENT_PROCESSING,
+    };
+  } catch (reason) {
+    return { ok: false, error: dbErrorMessage(reason) };
+  }
+}
+
+export async function serviceCancelPipelineRun(
+  userId: string,
+  runId: string,
+): Promise<{ ok: true } | PipelineErr> {
+  const run = await getPipelineRunForUser(runId, userId);
+  if (!run) {
+    return { ok: false, error: "Not found." };
+  }
+  if (run.status !== "processing") {
+    return { ok: false, error: "This run is no longer in progress." };
+  }
+  try {
+    await markPipelineRunCancelled({
+      runId,
+      userId,
+      stage: activeStage(run) ?? undefined,
+    });
+    return { ok: true };
+  } catch (reason) {
+    return { ok: false, error: dbErrorMessage(reason) };
+  }
+}
+
+export async function serviceCancelStalePipelineRuns(
+  userId: string,
+): Promise<{ ok: true; cancelled: number } | PipelineErr> {
+  try {
+    const rows = await listProcessingRunsForUser(userId);
+    let cancelled = 0;
+    for (const row of rows) {
+      const probe = await probeProcessingRunStale(row);
+      if (!probe.stale) continue;
+      await markPipelineRunCancelled({
+        runId: row.id,
+        userId,
+        stage: activeStageFromRow(row) ?? undefined,
+      });
+      cancelled += 1;
+    }
+    return { ok: true, cancelled };
+  } catch (reason) {
+    return { ok: false, error: dbErrorMessage(reason) };
+  }
+}
+
+async function restartStageInference(
+  userId: string,
+  run: PredictionPipelineRunRow,
+  stage: StageNumber,
+): Promise<
+  | { ok: true; externalJobId: string; totalModels: number }
+  | PipelineErr
+> {
+  const file = await fetchRunImageAsFile(run);
+  if (!file) {
+    return { ok: false, error: "Stored image is missing for this run." };
+  }
+
+  let batchConfig: ReturnType<typeof stageBatchConfig>;
+  try {
+    batchConfig = stageBatchConfig(
+      stage,
+      run.stage3_model_filename ?? undefined,
+    );
+  } catch (reason) {
+    return { ok: false, error: runError(reason) };
+  }
+
+  let batch: BatchStartResult;
+  try {
+    batch = await startRemoteBatch({
+      apiBaseUrl: batchConfig.apiBaseUrl,
+      file,
+      modelInputFeatureSize: batchConfig.modelInputFeatureSize,
+      modelFilenames: batchConfig.modelFilenames,
+    });
+  } catch (reason) {
+    const message = runError(reason);
+    await markPipelineRunFailed({
+      runId: run.id,
+      userId,
+      stage,
+      message,
+    });
+    return { ok: false, error: message };
+  }
+
+  try {
+    if (stage === 1) {
+      await updateStage1ExternalJobId({
+        runId: run.id,
+        userId,
+        externalJobId: batch.externalJobId,
+      });
+    } else if (stage === 2) {
+      await updateStage2ExternalJobId({
+        runId: run.id,
+        userId,
+        externalJobId: batch.externalJobId,
+      });
+    } else {
+      await updateStage3ExternalJobId({
+        runId: run.id,
+        userId,
+        externalJobId: batch.externalJobId,
+        modelFilename: run.stage3_model_filename,
+      });
+    }
+  } catch (reason) {
+    return { ok: false, error: dbErrorMessage(reason) };
+  }
+
+  return {
+    ok: true,
+    externalJobId: batch.externalJobId,
+    totalModels: batch.totalModels,
+  };
+}
+
+export type PipelineResumeOk = {
+  ok: true;
+  id: string;
+  resumeKind: "websocket" | "sync";
+  stage: StageNumber | null;
+  externalJobId?: string;
+  totalModels?: number;
+  sync?: PipelineSyncOk;
+};
+
+export async function serviceResumePipelineRun(
+  userId: string,
+  runId: string,
+): Promise<PipelineResumeOk | PipelineErr> {
+  const run = await getPipelineRunForUser(runId, userId);
+  if (!run) {
+    return { ok: false, error: "Not found." };
+  }
+  if (run.status !== "processing") {
+    return { ok: false, error: "This run is no longer in progress." };
+  }
+
+  const proc = processingRowFromRun(run);
+  const probe = await probeProcessingRunStale(proc);
+
+  const sync = await serviceSyncPipelineRun(userId, runId);
+  if (sync.ok && sync.runStatus === "finished") {
+    return {
+      ok: true,
+      id: runId,
+      resumeKind: "sync",
+      stage: null,
+      sync,
+    };
+  }
+
+  if (sync.ok && (sync.awaitingStage2Start || sync.awaitingStage3Start)) {
+    const file = await fetchRunImageAsFile(run);
+    if (!file) {
+      return { ok: false, error: "Stored image is missing for this run." };
+    }
+    if (sync.awaitingStage2Start) {
+      const started = await serviceStartPipelineStage2(userId, runId, file);
+      if (!started.ok) return started;
+      return {
+        ok: true,
+        id: runId,
+        resumeKind: "websocket",
+        stage: 2,
+        externalJobId: started.stage.externalJobId,
+        totalModels: started.stage.totalModels,
+        sync,
+      };
+    }
+    const modelFilename =
+      run.stage3_model_filename ?? DEFAULT_STAGE3_MODEL_FILENAME;
+    const started = await serviceStartPipelineStage3(
+      userId,
+      runId,
+      file,
+      modelFilename,
+    );
+    if (!started.ok) return started;
+    return {
+      ok: true,
+      id: runId,
+      resumeKind: "websocket",
+      stage: 3,
+      externalJobId: started.stage.externalJobId,
+      totalModels: started.stage.totalModels,
+      sync,
+    };
+  }
+
+  if (sync.ok && sync.persisted && sync.stage) {
+    return {
+      ok: true,
+      id: runId,
+      resumeKind: "sync",
+      stage: sync.stage,
+      sync,
+    };
+  }
+
+  const existing = await buildSubmitResponseFromExistingRun(run);
+  if (existing.ok && "stage" in existing && existing.stage) {
+    return {
+      ok: true,
+      id: runId,
+      resumeKind: "websocket",
+      stage: existing.stage.stage,
+      externalJobId: existing.stage.externalJobId,
+      totalModels: existing.stage.totalModels,
+    };
+  }
+
+  if (probe.stale) {
+    const stage =
+      activeStage(run) ??
+      (shouldAwaitStage2Start(run)
+        ? 2
+        : shouldAwaitStage3Start(run)
+          ? 3
+          : null);
+    if (!stage) {
+      return {
+        ok: false,
+        error: "This run cannot be resumed. Try cancelling it instead.",
+      };
+    }
+    const restarted = await restartStageInference(userId, run, stage);
+    if (!restarted.ok) return restarted;
+    return {
+      ok: true,
+      id: runId,
+      resumeKind: "websocket",
+      stage,
+      externalJobId: restarted.externalJobId,
+      totalModels: restarted.totalModels,
+    };
+  }
+
+  if (shouldAwaitStage2Start(run)) {
+    const file = await fetchRunImageAsFile(run);
+    if (!file) {
+      return { ok: false, error: "Stored image is missing for this run." };
+    }
+    const started = await serviceStartPipelineStage2(userId, runId, file);
+    if (!started.ok) return started;
+    return {
+      ok: true,
+      id: runId,
+      resumeKind: "websocket",
+      stage: 2,
+      externalJobId: started.stage.externalJobId,
+      totalModels: started.stage.totalModels,
+    };
+  }
+
+  if (shouldAwaitStage3Start(run)) {
+    const file = await fetchRunImageAsFile(run);
+    if (!file) {
+      return { ok: false, error: "Stored image is missing for this run." };
+    }
+    const modelFilename =
+      run.stage3_model_filename ?? DEFAULT_STAGE3_MODEL_FILENAME;
+    const started = await serviceStartPipelineStage3(
+      userId,
+      runId,
+      file,
+      modelFilename,
+    );
+    if (!started.ok) return started;
+    return {
+      ok: true,
+      id: runId,
+      resumeKind: "websocket",
+      stage: 3,
+      externalJobId: started.stage.externalJobId,
+      totalModels: started.stage.totalModels,
+    };
+  }
+
+  return {
+    ok: false,
+    error: "This run cannot be resumed. Try cancelling it instead.",
+  };
 }

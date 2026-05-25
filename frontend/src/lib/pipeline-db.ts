@@ -86,6 +86,26 @@ export type PredictionCacheSignatureRow = {
 
 const MAX_CONCURRENT_PROCESSING = 3;
 
+export { MAX_CONCURRENT_PROCESSING };
+
+/** Lightweight row for in-flight run recovery (no heavy JSONB payloads). */
+export type ProcessingPipelineRunRow = {
+  id: string;
+  created_at: string;
+  updated_at: string;
+  original_filename: string | null;
+  image_object_key: string | null;
+  stage1_status: StageRunStatus;
+  stage2_status: StageRunStatus;
+  stage3_status: StageRunStatus;
+  stage1_external_job_id: string | null;
+  stage2_external_job_id: string | null;
+  stage3_external_job_id: string | null;
+  stage3_model_filename: string | null;
+  skip_stage1_requested: boolean;
+  skip_stage2_requested: boolean;
+};
+
 export async function countProcessingRuns(userId: string): Promise<number> {
   const sql = getSql();
   const rows = await sql`
@@ -350,6 +370,37 @@ export async function saveStage3Result(params: {
         updated_at = now()
     WHERE id = ${params.runId}::uuid AND user_id = ${params.userId}
   `;
+}
+
+export async function listProcessingRunsForUser(
+  userId: string,
+): Promise<ProcessingPipelineRunRow[]> {
+  const sql = getSql();
+  const rows = await sql`
+    SELECT id, created_at, updated_at, original_filename, image_object_key,
+           stage1_status, stage2_status, stage3_status,
+           stage1_external_job_id, stage2_external_job_id, stage3_external_job_id,
+           stage3_model_filename,
+           COALESCE(skip_stage1_requested, false) AS skip_stage1_requested,
+           COALESCE(skip_stage2_requested, false) AS skip_stage2_requested
+    FROM prediction_pipeline_runs
+    WHERE user_id = ${userId} AND status = 'processing'
+    ORDER BY updated_at DESC
+  `;
+  return rows as ProcessingPipelineRunRow[];
+}
+
+export async function markPipelineRunCancelled(params: {
+  runId: string;
+  userId: string;
+  stage?: 1 | 2 | 3;
+}): Promise<void> {
+  await markPipelineRunFailed({
+    runId: params.runId,
+    userId: params.userId,
+    stage: params.stage,
+    message: "Cancelled by user.",
+  });
 }
 
 export async function markPipelineRunFailed(params: {
