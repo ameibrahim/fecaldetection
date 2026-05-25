@@ -53,6 +53,7 @@ import { DetectionImagePreview } from "@/components/dashboard/detection-image-pr
 import { getDetectionPaletteEntryForClass } from "@/lib/detection-palette";
 import { buildDetectionOverlayItemsFromResults } from "@/lib/stage3-detection-overlay";
 import { resolvePipelineTerminalOutcome } from "@/lib/pipeline-terminal-outcome";
+import { extractPreviewResultsFromStoredRun } from "@/lib/pipeline-result-payload";
 import {
   previewUrlFromFile,
   revokePreviewUrl,
@@ -145,6 +146,11 @@ type StageVoteSummary = {
   positiveVotes: number;
   negativeVotes: number;
   majorityClass: 0 | 1;
+  modelVotes?: Array<{
+    modelFilename: string;
+    predictedClass: number | null;
+    maxProb: number | null;
+  }>;
 };
 
 type ActivityItem = {
@@ -1999,26 +2005,13 @@ export function HelminthPredictPanel({
       if (data.stage1VoteSummary) setStage1Vote(data.stage1VoteSummary);
       if (data.stage2VoteSummary) setStage2Vote(data.stage2VoteSummary);
 
-      const results =
-        (data.stage3ResultPayload &&
-          typeof data.stage3ResultPayload === "object" &&
-          Array.isArray(
-            (data.stage3ResultPayload as { results?: unknown[] }).results,
-          ) &&
-          (data.stage3ResultPayload as { results: unknown[] }).results) ||
-        (data.stage2ResultPayload &&
-          typeof data.stage2ResultPayload === "object" &&
-          Array.isArray(
-            (data.stage2ResultPayload as { results?: unknown[] }).results,
-          ) &&
-          (data.stage2ResultPayload as { results: unknown[] }).results) ||
-        (data.stage1ResultPayload &&
-          typeof data.stage1ResultPayload === "object" &&
-          Array.isArray(
-            (data.stage1ResultPayload as { results?: unknown[] }).results,
-          ) &&
-          (data.stage1ResultPayload as { results: unknown[] }).results) ||
-        [];
+      const results = extractPreviewResultsFromStoredRun({
+        stage1ResultPayload: data.stage1ResultPayload,
+        stage2ResultPayload: data.stage2ResultPayload,
+        stage3ResultPayload: data.stage3ResultPayload,
+        stage1VoteSummary: data.stage1VoteSummary ?? null,
+        stage2VoteSummary: data.stage2VoteSummary ?? null,
+      });
 
       setPreview({ results, errors: [] });
       setProgress({ done: 0, total: 0 });

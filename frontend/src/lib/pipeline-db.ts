@@ -1,4 +1,5 @@
 import { getSql } from "@/lib/db";
+import { compactBinaryPayloadFromVoteSummary } from "@/lib/pipeline-result-payload";
 
 export type PipelineRunStatus = "processing" | "finished" | "failed" | "timed_out";
 export type StageRunStatus =
@@ -71,7 +72,7 @@ export type PredictionPipelineRunRow = {
 export type PredictionCacheSignatureRow = {
   image_hash: string;
   pipeline_version_key: string;
-  stage1_result_payload: unknown;
+  stage1_result_payload: unknown | null;
   stage1_vote_summary: VoteSummary | null;
   stage2_result_payload: unknown | null;
   stage2_vote_summary: VoteSummary | null;
@@ -595,21 +596,15 @@ export async function recordCacheSignatureHit(
 export async function upsertCacheSignature(params: {
   imageHash: string;
   pipelineVersionKey: string;
-  stage1ResultPayload: unknown;
   stage1VoteSummary: VoteSummary | null;
-  stage2ResultPayload: unknown | null;
   stage2VoteSummary: VoteSummary | null;
   stage3ResultPayload: unknown | null;
   finalOutcome: string;
   sourceRunId: string;
 }): Promise<void> {
   const sql = getSql();
-  const s1 = JSON.stringify(params.stage1ResultPayload);
   const s1v = params.stage1VoteSummary
     ? JSON.stringify(params.stage1VoteSummary)
-    : null;
-  const s2 = params.stage2ResultPayload
-    ? JSON.stringify(params.stage2ResultPayload)
     : null;
   const s2v = params.stage2VoteSummary
     ? JSON.stringify(params.stage2VoteSummary)
@@ -627,18 +622,18 @@ export async function upsertCacheSignature(params: {
     ) VALUES (
       ${params.imageHash},
       ${params.pipelineVersionKey},
-      ${s1}::jsonb,
+      NULL,
       ${s1v}::jsonb,
-      ${s2}::jsonb,
+      NULL,
       ${s2v}::jsonb,
       ${s3}::jsonb,
       ${params.finalOutcome},
       ${params.sourceRunId}::uuid
     )
     ON CONFLICT (image_hash, pipeline_version_key) DO UPDATE SET
-      stage1_result_payload = EXCLUDED.stage1_result_payload,
+      stage1_result_payload = NULL,
       stage1_vote_summary = EXCLUDED.stage1_vote_summary,
-      stage2_result_payload = EXCLUDED.stage2_result_payload,
+      stage2_result_payload = NULL,
       stage2_vote_summary = EXCLUDED.stage2_vote_summary,
       stage3_result_payload = EXCLUDED.stage3_result_payload,
       final_outcome = EXCLUDED.final_outcome,
@@ -658,13 +653,25 @@ export async function insertCachedPipelineRun(params: {
 }): Promise<void> {
   const sql = getSql();
   const stages = stageStatusesFromFinalOutcome(params.signature.final_outcome);
-  const s1 = JSON.stringify(params.signature.stage1_result_payload);
+  const s1 =
+    params.signature.stage1_result_payload != null
+      ? JSON.stringify(params.signature.stage1_result_payload)
+      : params.signature.stage1_vote_summary
+        ? JSON.stringify(
+            compactBinaryPayloadFromVoteSummary(params.signature.stage1_vote_summary),
+          )
+        : null;
   const s1v = params.signature.stage1_vote_summary
     ? JSON.stringify(params.signature.stage1_vote_summary)
     : null;
-  const s2 = params.signature.stage2_result_payload
-    ? JSON.stringify(params.signature.stage2_result_payload)
-    : null;
+  const s2 =
+    params.signature.stage2_result_payload != null
+      ? JSON.stringify(params.signature.stage2_result_payload)
+      : params.signature.stage2_vote_summary
+        ? JSON.stringify(
+            compactBinaryPayloadFromVoteSummary(params.signature.stage2_vote_summary),
+          )
+        : null;
   const s2v = params.signature.stage2_vote_summary
     ? JSON.stringify(params.signature.stage2_vote_summary)
     : null;

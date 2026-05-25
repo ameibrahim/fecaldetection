@@ -50,6 +50,10 @@ import {
   uploadPredictionImage,
   uploadPredictionImageBuffer,
 } from "@/lib/server/prediction-image-storage";
+import {
+  trimStage3ResultPayload,
+  trimStageBinaryResultPayload,
+} from "@/lib/pipeline-result-payload";
 import { renderStage3AnnotatedPng } from "@/lib/server/render-stage3-annotated-image";
 import {
   fetchRemoteJobStatus,
@@ -373,15 +377,20 @@ async function writeCacheIfEligible(
   run: PredictionPipelineRunRow,
 ): Promise<void> {
   if (run.status !== "finished" || run.cache_hit || !run.image_hash) return;
-  if (!run.final_outcome || !run.stage1_result_payload) return;
+  if (!run.final_outcome) return;
+  if (
+    !run.stage1_vote_summary &&
+    !run.stage2_vote_summary &&
+    !run.stage3_result_payload
+  ) {
+    return;
+  }
 
   try {
     await upsertCacheSignature({
       imageHash: run.image_hash,
       pipelineVersionKey: getPipelineVersionKey(),
-      stage1ResultPayload: run.stage1_result_payload,
       stage1VoteSummary: run.stage1_vote_summary,
-      stage2ResultPayload: run.stage2_result_payload,
       stage2VoteSummary: run.stage2_vote_summary,
       stage3ResultPayload: run.stage3_result_payload,
       finalOutcome: run.final_outcome,
@@ -631,7 +640,7 @@ async function saveFinishedStage1(params: {
   await saveStage1Result({
     runId: params.run.id,
     userId: params.userId,
-    payload: params.remote,
+    payload: trimStageBinaryResultPayload(params.remote, voteSummary),
     voteSummary,
     isFecal,
     userSkippedStage2,
@@ -672,7 +681,7 @@ async function saveFinishedStage2(params: {
   await saveStage2Result({
     runId: params.run.id,
     userId: params.userId,
-    payload: params.remote,
+    payload: trimStageBinaryResultPayload(params.remote, voteSummary),
     voteSummary,
     finalOutcome,
     awaitStage3,
@@ -725,7 +734,7 @@ async function saveFinishedStage3(params: {
   await saveStage3Result({
     runId: params.run.id,
     userId: params.userId,
-    payload: params.remote,
+    payload: trimStage3ResultPayload(params.remote),
     annotatedImageObjectKey,
   });
   const updated = await getPipelineRunForUser(params.run.id, params.userId);
