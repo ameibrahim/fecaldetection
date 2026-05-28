@@ -1,5 +1,7 @@
 "use client";
 
+import type { ImageBoxCoordinateMeta } from "@/lib/read-image-box-meta";
+import { mapBoxToObjectFitContain } from "@/lib/detection-box-layout";
 import { getDetectionPaletteEntryForClass } from "@/lib/detection-palette";
 import { cn } from "@/lib/utils";
 import { useCallback, useLayoutEffect, useRef, useState } from "react";
@@ -20,6 +22,11 @@ type DetectionImagePreviewProps = {
   objectUrl: string | null;
   items: DetectionBoxItem[];
   className?: string;
+  /** Full-resolution width when preview pixels differ from model coordinates (e.g. TIFF). */
+  boxSourceWidth?: number;
+  boxSourceHeight?: number;
+  /** EXIF metadata from the same bytes the model received. */
+  boxCoordinateMeta?: ImageBoxCoordinateMeta | null;
   /** Fires after the backing image has loaded and layout is measured. */
   onImageLoad?: () => void;
 };
@@ -28,6 +35,9 @@ export function DetectionImagePreview({
   objectUrl,
   items,
   className,
+  boxSourceWidth,
+  boxSourceHeight,
+  boxCoordinateMeta,
   onImageLoad,
 }: DetectionImagePreviewProps) {
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -56,8 +66,17 @@ export function DetectionImagePreview({
 
   if (!objectUrl) return null;
 
-  const sx = layout.nw > 0 ? layout.w / layout.nw : 1;
-  const sy = layout.nh > 0 ? layout.h / layout.nh : 1;
+  const containLayout = {
+    containerWidth: layout.w,
+    containerHeight: layout.h,
+    imageWidth: layout.nw,
+    imageHeight: layout.nh,
+    boxSourceWidth,
+    boxSourceHeight,
+    exifOrientation: boxCoordinateMeta?.orientation,
+    rawWidth: boxCoordinateMeta?.rawWidth,
+    rawHeight: boxCoordinateMeta?.rawHeight,
+  };
 
   return (
     <div
@@ -80,11 +99,10 @@ export function DetectionImagePreview({
       />
       <div className="pointer-events-none absolute inset-0" aria-hidden>
         {items.map((d) => {
-          const [x1, y1, x2, y2] = d.box;
-          const left = x1 * sx;
-          const top = y1 * sy;
-          const width = Math.max(0, (x2 - x1) * sx);
-          const height = Math.max(0, (y2 - y1) * sy);
+          const { left, top, width, height } = mapBoxToObjectFitContain(
+            d.box,
+            containLayout,
+          );
           const colors = getDetectionPaletteEntryForClass(d.classId, d.className);
           return (
             <div

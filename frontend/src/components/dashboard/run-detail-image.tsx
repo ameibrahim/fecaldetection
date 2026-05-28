@@ -4,9 +4,13 @@ import { DetectionImagePreview } from "@/components/dashboard/detection-image-pr
 import type { DetectionBoxItem } from "@/components/dashboard/detection-image-preview";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useBrowserImagePreviewUrl } from "@/hooks/use-browser-image-preview-url";
+import {
+  readImageBoxCoordinateMeta,
+  type ImageBoxCoordinateMeta,
+} from "@/lib/read-image-box-meta";
 import { cn } from "@/lib/utils";
 import { ImageOff } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 type RunDetailImageProps = {
   src: string;
@@ -25,10 +29,12 @@ type RunDetailImageProps = {
 
 export function RunDetailImage(props: RunDetailImageProps) {
   const [loaded, setLoaded] = useState(false);
+  const [boxCoordinateMeta, setBoxCoordinateMeta] =
+    useState<ImageBoxCoordinateMeta | null>(null);
   const tiffDecode = props.tiffDecode ?? false;
   const filenameHint = props.filenameHint ?? null;
 
-  const { displayUrl, loading, error } = useBrowserImagePreviewUrl(
+  const { displayUrl, loading, error, sourceWidth, sourceHeight } = useBrowserImagePreviewUrl(
     tiffDecode ? props.src : null,
     {
       enabled: tiffDecode,
@@ -36,6 +42,35 @@ export function RunDetailImage(props: RunDetailImageProps) {
       credentials: "include",
     },
   );
+
+  useEffect(() => {
+    if (props.withOverlay !== true) {
+      setBoxCoordinateMeta(null);
+      return;
+    }
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch(props.src, { credentials: "include" });
+        if (!res.ok) throw new Error(`Could not load image (${res.status}).`);
+        const blob = await res.blob();
+        const meta = await readImageBoxCoordinateMeta(blob);
+        if (!cancelled) setBoxCoordinateMeta(meta);
+      } catch {
+        if (!cancelled) setBoxCoordinateMeta(null);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [props.withOverlay, props.src]);
+
+  const boxSourceWidth =
+    props.withOverlay === true ? (sourceWidth ?? undefined) : undefined;
+  const boxSourceHeight =
+    props.withOverlay === true ? (sourceHeight ?? undefined) : undefined;
 
   const imageSrc = tiffDecode ? displayUrl : props.src;
   const showSkeleton = (tiffDecode && loading) || (!loaded && imageSrc);
@@ -78,6 +113,9 @@ export function RunDetailImage(props: RunDetailImageProps) {
           <DetectionImagePreview
             objectUrl={imageSrc}
             items={props.items}
+            boxSourceWidth={boxSourceWidth}
+            boxSourceHeight={boxSourceHeight}
+            boxCoordinateMeta={boxCoordinateMeta}
             onImageLoad={() => setLoaded(true)}
           />
         </div>

@@ -21,6 +21,8 @@ export function useBrowserImagePreviewUrl(
   displayUrl: string | null;
   loading: boolean;
   error: string | null;
+  sourceWidth: number | null;
+  sourceHeight: number | null;
 } {
   const {
     enabled = true,
@@ -41,12 +43,16 @@ export function useBrowserImagePreviewUrl(
   );
   const [loading, setLoading] = useState(mightBeTiff);
   const [error, setError] = useState<string | null>(null);
+  const [sourceWidth, setSourceWidth] = useState<number | null>(null);
+  const [sourceHeight, setSourceHeight] = useState<number | null>(null);
 
   useEffect(() => {
     if (!src || !enabled) {
       setDisplayUrl(src);
       setLoading(false);
       setError(null);
+      setSourceWidth(null);
+      setSourceHeight(null);
       return;
     }
 
@@ -58,6 +64,8 @@ export function useBrowserImagePreviewUrl(
       setDisplayUrl(src);
       setLoading(false);
       setError(null);
+      setSourceWidth(null);
+      setSourceHeight(null);
       return;
     }
 
@@ -66,6 +74,8 @@ export function useBrowserImagePreviewUrl(
     setLoading(true);
     setError(null);
     setDisplayUrl(null);
+    setSourceWidth(null);
+    setSourceHeight(null);
 
     void (async () => {
       try {
@@ -75,16 +85,18 @@ export function useBrowserImagePreviewUrl(
         }
         const blob = await res.blob();
         const resolvedType = contentType ?? blob.type ?? null;
-        const url = await previewUrlFromFetchedBlob(blob, {
+        const preview = await previewUrlFromFetchedBlob(blob, {
           name: filename,
           type: resolvedType,
         });
         if (cancelled) {
-          revokePreviewUrl(url);
+          revokePreviewUrl(preview.url);
           return;
         }
-        createdUrl = url;
-        setDisplayUrl(url);
+        createdUrl = preview.url;
+        setDisplayUrl(preview.url);
+        setSourceWidth(preview.sourceWidth ?? null);
+        setSourceHeight(preview.sourceHeight ?? null);
         setLoading(false);
       } catch (reason) {
         if (cancelled) return;
@@ -104,5 +116,5 @@ export function useBrowserImagePreviewUrl(
     };
   }, [src, enabled, filename, contentType, credentials]);
 
-  return { displayUrl, loading, error };
+  return { displayUrl, loading, error, sourceWidth, sourceHeight };
 }
