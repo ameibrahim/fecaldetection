@@ -1,5 +1,12 @@
 const MAX_PREVIEW_DIMENSION = 4096;
 
+export type ImagePreviewSource = {
+  url: string;
+  /** Full-resolution width when the preview blob is downscaled (TIFF). */
+  sourceWidth?: number;
+  sourceHeight?: number;
+};
+
 export type TiffSourceHints = {
   name?: string | null;
   type?: string | null;
@@ -18,7 +25,9 @@ async function loadUtif() {
 }
 
 /** Decode the first page of a TIFF buffer to a PNG blob for browser display. */
-export async function decodeTiffToPngBlob(buffer: ArrayBuffer): Promise<Blob> {
+export async function decodeTiffToPngBlob(
+  buffer: ArrayBuffer,
+): Promise<{ blob: Blob; sourceWidth: number; sourceHeight: number }> {
   const UTIF = await loadUtif();
   const ifds = UTIF.decode(buffer);
   if (!ifds.length) {
@@ -75,26 +84,34 @@ export async function decodeTiffToPngBlob(buffer: ArrayBuffer): Promise<Blob> {
       "image/png",
     );
   });
-  return blob;
+  return { blob, sourceWidth: width, sourceHeight: height };
 }
 
 export async function previewUrlFromFetchedBlob(
   blob: Blob,
   hints: TiffSourceHints,
-): Promise<string> {
+): Promise<ImagePreviewSource> {
   if (!isTiffSource({ ...hints, type: hints.type ?? blob.type })) {
-    return URL.createObjectURL(blob);
+    return { url: URL.createObjectURL(blob) };
   }
-  const pngBlob = await decodeTiffToPngBlob(await blob.arrayBuffer());
-  return URL.createObjectURL(pngBlob);
+  const decoded = await decodeTiffToPngBlob(await blob.arrayBuffer());
+  return {
+    url: URL.createObjectURL(decoded.blob),
+    sourceWidth: decoded.sourceWidth,
+    sourceHeight: decoded.sourceHeight,
+  };
 }
 
-export async function previewUrlFromFile(file: File): Promise<string> {
+export async function previewUrlFromFile(file: File): Promise<ImagePreviewSource> {
   if (!isTiffSource({ name: file.name, type: file.type })) {
-    return URL.createObjectURL(file);
+    return { url: URL.createObjectURL(file) };
   }
-  const pngBlob = await decodeTiffToPngBlob(await file.arrayBuffer());
-  return URL.createObjectURL(pngBlob);
+  const decoded = await decodeTiffToPngBlob(await file.arrayBuffer());
+  return {
+    url: URL.createObjectURL(decoded.blob),
+    sourceWidth: decoded.sourceWidth,
+    sourceHeight: decoded.sourceHeight,
+  };
 }
 
 export function revokePreviewUrl(url: string | null | undefined): void {

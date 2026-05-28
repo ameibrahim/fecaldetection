@@ -1,3 +1,4 @@
+import { transformBoxRawToDisplay, normalizeExifOrientation } from "@/lib/exif-box-transform";
 import {
   DETECTION_PALETTE,
   paletteIndexForClass,
@@ -75,19 +76,33 @@ export async function renderStage3AnnotatedPng(params: {
   const boxes = flattenBoxes(params.remote);
   if (boxes.length === 0) return null;
 
-  const meta = await sharp(params.imageBuf).metadata();
-  const w = meta.width ?? 0;
-  const h = meta.height ?? 0;
+  const rawMeta = await sharp(params.imageBuf).metadata();
+  const rawW = rawMeta.width ?? 0;
+  const rawH = rawMeta.height ?? 0;
+  if (rawW <= 0 || rawH <= 0) return null;
+
+  const orientation = normalizeExifOrientation(rawMeta.orientation);
+  const oriented = sharp(params.imageBuf).rotate();
+  const orientedBuf = await oriented.toBuffer();
+  const orientedMeta = await oriented.metadata();
+  const w = orientedMeta.width ?? 0;
+  const h = orientedMeta.height ?? 0;
   if (w <= 0 || h <= 0) return null;
 
   const parts: string[] = [
     `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">`,
   ];
   for (const b of boxes) {
-    const x1 = Math.min(b.x1, b.x2);
-    const y1 = Math.min(b.y1, b.y2);
-    const x2 = Math.max(b.x1, b.x2);
-    const y2 = Math.max(b.y1, b.y2);
+    const [tx1, ty1, tx2, ty2] = transformBoxRawToDisplay(
+      [b.x1, b.y1, b.x2, b.y2],
+      orientation,
+      rawW,
+      rawH,
+    );
+    const x1 = Math.min(tx1, tx2);
+    const y1 = Math.min(ty1, ty2);
+    const x2 = Math.max(tx1, tx2);
+    const y2 = Math.max(ty1, ty2);
     const bw = Math.max(0, x2 - x1);
     const bh = Math.max(0, y2 - y1);
     const label = svgEscape(b.legendKey);
@@ -119,7 +134,7 @@ export async function renderStage3AnnotatedPng(params: {
   parts.push("</svg>");
   const svg = parts.join("");
 
-  return sharp(params.imageBuf)
+  return sharp(orientedBuf)
     .composite([{ input: Buffer.from(svg), top: 0, left: 0 }])
     .png({ compressionLevel: 8 })
     .toBuffer();

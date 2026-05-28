@@ -56,6 +56,7 @@ import type { UnfinishedRunItem } from "@/lib/unfinished-run-meta";
 import { computeImageHashSha256 } from "@/lib/image-hash";
 import { DetectionImagePreview } from "@/components/dashboard/detection-image-preview";
 import { getDetectionPaletteEntryForClass } from "@/lib/detection-palette";
+import { readImageBoxCoordinateMetaFromFile, type ImageBoxCoordinateMeta } from "@/lib/read-image-box-meta";
 import { buildDetectionOverlayItemsFromResults } from "@/lib/stage3-detection-overlay";
 import { resolvePipelineTerminalOutcome } from "@/lib/pipeline-terminal-outcome";
 import { extractPreviewResultsFromStoredRun } from "@/lib/pipeline-result-payload";
@@ -306,6 +307,12 @@ export function HelminthPredictPanel({
   const [stage1Vote, setStage1Vote] = useState<StageVoteSummary | null>(null);
   const [stage2Vote, setStage2Vote] = useState<StageVoteSummary | null>(null);
   const [localImageUrl, setLocalImageUrl] = useState<string | null>(null);
+  const [boxSourceSize, setBoxSourceSize] = useState<{
+    width: number;
+    height: number;
+  } | null>(null);
+  const [boxCoordinateMeta, setBoxCoordinateMeta] =
+    useState<ImageBoxCoordinateMeta | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [gradcamPanel, setGradcamPanel] = useState<{
@@ -391,6 +398,8 @@ export function HelminthPredictPanel({
   useEffect(() => {
     if (!file) {
       setLocalImageUrl(null);
+      setBoxSourceSize(null);
+      setBoxCoordinateMeta(null);
       setPreviewLoading(false);
       setPreviewError(null);
       return;
@@ -402,14 +411,23 @@ export function HelminthPredictPanel({
     setPreviewError(null);
     setLocalImageUrl(null);
 
-    void previewUrlFromFile(file)
-      .then((url) => {
+    void Promise.all([previewUrlFromFile(file), readImageBoxCoordinateMetaFromFile(file)])
+      .then(([preview, meta]) => {
         if (cancelled) {
-          revokePreviewUrl(url);
+          revokePreviewUrl(preview.url);
           return;
         }
-        createdUrl = url;
-        setLocalImageUrl(url);
+        createdUrl = preview.url;
+        setLocalImageUrl(preview.url);
+        setBoxCoordinateMeta(meta);
+        if (preview.sourceWidth && preview.sourceHeight) {
+          setBoxSourceSize({
+            width: preview.sourceWidth,
+            height: preview.sourceHeight,
+          });
+        } else {
+          setBoxSourceSize(null);
+        }
         setPreviewLoading(false);
       })
       .catch((reason: unknown) => {
@@ -2847,6 +2865,9 @@ export function HelminthPredictPanel({
                   <DetectionImagePreview
                     objectUrl={localImageUrl}
                     items={detectionOverlayItems}
+                    boxSourceWidth={boxSourceSize?.width}
+                    boxSourceHeight={boxSourceSize?.height}
+                    boxCoordinateMeta={boxCoordinateMeta}
                   />
                   ) : null}
                   {stage3Status === "complete" && detectionOverlayItems.length === 0 ? (
